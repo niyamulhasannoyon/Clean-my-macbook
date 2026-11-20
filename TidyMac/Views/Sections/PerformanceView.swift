@@ -43,6 +43,9 @@ struct PerformanceView: View {
                     statusColor: .mint
                 )
                 
+                // Dry-Run Notice
+                DryRunBanner()
+                
                 // Mode Segmented Control
                 Picker("", selection: $selectedTab) {
                     ForEach(PerformanceTab.allCases) { tab in

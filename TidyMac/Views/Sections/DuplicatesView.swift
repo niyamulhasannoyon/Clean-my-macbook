@@ -21,8 +21,24 @@ public struct DuplicatesView: View {
                         statusColor: headerStatusColor
                     )
                     
+                    // Dry-Run Notice
+                    DryRunBanner()
+                    
                     // Full Disk Access Banner
                     FDAPermissionBanner(featureName: "Duplicate File Finder")
+                    
+                    // Error Banner
+                    if let err = scanner.scanError {
+                        ModuleErrorBanner(
+                            message: err,
+                            onRetry: {
+                                Task { await scanner.startScan() }
+                            },
+                            onDismiss: {
+                                scanner.scanError = nil
+                            }
+                        )
+                    }
                     
                     // Metric Summary Tiles
                     HStack(spacing: 12) {

@@ -11,6 +11,7 @@ public final class PrivacyScanner: ObservableObject {
     @Published public var lastReclaimedBytes: Int64 = 0
     @Published public var showSuccessAlert: Bool = false
     @Published public var runningBrowserWarning: BrowserType? = nil
+    @Published public var scanError: String? = nil
     
     private let home = FileManager.default.homeDirectoryForCurrentUser
     
@@ -375,6 +376,8 @@ public final class PrivacyScanner: ObservableObject {
         
         isClearing = true
         showSuccessAlert = false
+        scanError = nil
+        let isDryRun = DryRunManager.shared.isEnabled
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -383,6 +386,11 @@ public final class PrivacyScanner: ObservableObject {
             for item in self.items where item.isEnabled {
                 totalReclaimed += item.sizeBytes
                 
+                if isDryRun {
+                    DryRunManager.shared.logSimulation(action: "Clean Privacy Trace", target: item.title)
+                    continue
+                }
+                
                 if item.browser == .firefox {
                     self.clearFirefoxItem(item: item)
                 } else {
@@ -390,12 +398,19 @@ public final class PrivacyScanner: ObservableObject {
                         let fullURL = self.home.appendingPathComponent(relPath)
                         let path = fullURL.path
                         
+                        if PathProtection.isProtected(url: fullURL) {
+                            print("Skipping protected privacy path: \(path)")
+                            continue
+                        }
+                        
                         var isDir: ObjCBool = false
                         if FileManager.default.fileExists(atPath: path, isDirectory: &isDir) {
                             if isDir.boolValue {
                                 if let contents = try? FileManager.default.contentsOfDirectory(at: fullURL, includingPropertiesForKeys: nil) {
                                     for file in contents {
-                                        try? FileManager.default.removeItem(at: file)
+                                        if !PathProtection.isProtected(url: file) {
+                                            try? FileManager.default.removeItem(at: file)
+                                        }
                                     }
                                 }
                             } else {
@@ -406,8 +421,8 @@ public final class PrivacyScanner: ObservableObject {
                 }
             }
             
-            // Restart sharedfilelistd if recent items cleared
-            if self.items.contains(where: { $0.browser == .recentItems && $0.isEnabled }) {
+            // Restart sharedfilelistd if recent items cleared (skip if dry-run)
+            if !isDryRun && self.items.contains(where: { $0.browser == .recentItems && $0.isEnabled }) {
                 let killTask = Process()
                 killTask.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
                 killTask.arguments = ["sharedfilelistd"]

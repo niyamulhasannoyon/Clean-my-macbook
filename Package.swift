@@ -18,8 +18,13 @@ let package = Package(
             path: "TidyMac",
             exclude: [
                 "Resources/Info.plist",
-                "Resources/Assets.xcassets"
+                "Resources/Assets.xcassets",
+                "Resources/AppIcon.icns"
             ]
+        ),
+        .executableTarget(
+            name: "UnitTests",
+            path: "Tests/UnitTests"
         )
     ]
 )

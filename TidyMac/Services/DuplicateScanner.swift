@@ -27,6 +27,7 @@ public class DuplicateScanner: ObservableObject {
     @Published public var showCelebration: Bool = false
     @Published public var searchKeyword: String = ""
     @Published public var filterCategory: String = "All"
+    @Published public var scanError: String? = nil
     
     // Safety verification flag: deletion can ONLY occur if confirmed
     @Published public var isDeleteConfirmedByUser: Bool = false
@@ -413,7 +414,8 @@ public class DuplicateScanner: ObservableObject {
         }
         guard !isCleaning else { return }
         isCleaning = true
-        statusMessage = "Moving confirmed duplicates to macOS Trash..."
+        let isDryRun = DryRunManager.shared.isEnabled
+        statusMessage = isDryRun ? "Simulating duplicate removal (Dry-Run mode)..." : "Moving confirmed duplicates to macOS Trash..."
         
         let startTime = Date()
         var reclaimedBytes: Int64 = 0
@@ -428,15 +430,29 @@ public class DuplicateScanner: ObservableObject {
             
             for file in group.files {
                 if file.isSelectedForRemoval {
-                    do {
-                        // Safely move to macOS Trash
-                        try fm.trashItem(at: file.url, resultingItemURL: nil)
+                    if let protErr = PathProtection.evaluatePath(url: file.url) {
+                        print("Skipping protected file: \(file.path) - \(protErr.localizedDescription)")
+                        errorsCount += 1
+                        remainingFiles.append(file)
+                        continue
+                    }
+                    
+                    if isDryRun {
+                        DryRunManager.shared.logSimulation(action: "Move Duplicate to Trash", target: file.path)
                         reclaimedBytes += file.size
                         reclaimedCount += 1
-                    } catch {
-                        errorsCount += 1
-                        print("Error moving duplicate to Trash: \(file.path), error: \(error.localizedDescription)")
-                        remainingFiles.append(file)
+                        // In simulation, file is considered removed from group
+                    } else {
+                        do {
+                            // Safely move to macOS Trash
+                            try fm.trashItem(at: file.url, resultingItemURL: nil)
+                            reclaimedBytes += file.size
+                            reclaimedCount += 1
+                        } catch {
+                            errorsCount += 1
+                            print("Error moving duplicate to Trash: \(file.path), error: \(error.localizedDescription)")
+                            remainingFiles.append(file)
+                        }
                     }
                 } else {
                     remainingFiles.append(file)
@@ -458,13 +474,16 @@ public class DuplicateScanner: ObservableObject {
             reclaimedFilesCount: reclaimedCount,
             errorsCount: errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: [:]
+            cleanedCategorySizes: [:],
+            isDryRun: isDryRun
         )
         
         self.lastCleanResult = result
         self.isCleaning = false
         self.showCelebration = true
-        self.statusMessage = "Successfully moved \(reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
+        self.statusMessage = isDryRun ?
+            "Dry-Run: Simulated \(reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
         
         StorageModel.shared.refresh()
     }

@@ -21,6 +21,19 @@ public struct DiskSpaceView: View {
                 // Full Disk Access Banner
                 FDAPermissionBanner(featureName: "Disk Space Visualizer")
                 
+                // Module Error Banner
+                if let err = scanner.scanError {
+                    ModuleErrorBanner(
+                        message: err,
+                        onRetry: {
+                            Task { await scanner.startScan() }
+                        },
+                        onDismiss: {
+                            scanner.scanError = nil
+                        }
+                    )
+                }
+                
                 // Top Control Bar: Locations & Chart Style
                 topControlBar
                 

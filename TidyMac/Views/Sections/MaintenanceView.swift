@@ -17,6 +17,9 @@ struct MaintenanceView: View {
                     statusColor: .pink
                 )
                 
+                // Dry-Run Notice
+                DryRunBanner()
+                
                 // Explanatory Banner
                 HStack(spacing: 14) {
                     Image(systemName: "shield.lefthalf.filled.badge.checkmark")

@@ -94,11 +94,11 @@ public struct ReclaimedCelebrationView: View {
                 
                 // Titles and Animated Counter
                 VStack(spacing: 6) {
-                    Text("Cleanup Complete!")
+                    Text(result.isDryRun ? "Dry-Run Simulation Complete" : "Cleanup Complete!")
                         .font(.title2.weight(.bold))
                         .foregroundColor(.primary)
                     
-                    Text("Space successfully reclaimed & moved to macOS Trash:")
+                    Text(result.isDryRun ? "Simulated reclaim (no files were modified or deleted):" : "Space successfully reclaimed & moved to macOS Trash:")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                     
@@ -107,7 +107,7 @@ public struct ReclaimedCelebrationView: View {
                         .modifier(AnimatableByteCountModifier(bytes: animatedBytes))
                         .padding(.vertical, 4)
                     
-                    Text("\(result.reclaimedFilesCount) files transferred safely")
+                    Text(result.isDryRun ? "\(result.reclaimedFilesCount) files simulated safely" : "\(result.reclaimedFilesCount) files transferred safely")
                         .font(.caption.weight(.medium))
                         .foregroundColor(.secondary)
                 }
@@ -150,15 +150,17 @@ public struct ReclaimedCelebrationView: View {
                 
                 // Safety notice badge
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.shield.fill")
-                        .foregroundColor(.green)
-                    Text("Safe & Reversible: All files were placed in Trash. You can restore them anytime via Finder.")
+                    Image(systemName: result.isDryRun ? "shield.fill" : "checkmark.shield.fill")
+                        .foregroundColor(result.isDryRun ? .orange : .green)
+                    Text(result.isDryRun ?
+                        "Dry-Run Mode: No files were touched or deleted. Safe preview completed." :
+                        "Safe & Reversible: All files were placed in Trash. You can restore them anytime via Finder.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity)
-                .background(Color.green.opacity(0.08))
+                .background((result.isDryRun ? Color.orange : Color.green).opacity(0.08))
                 .cornerRadius(10)
                 
                 // Dismiss Action Button

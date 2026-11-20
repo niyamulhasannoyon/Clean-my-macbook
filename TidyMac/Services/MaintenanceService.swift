@@ -77,11 +77,27 @@ public final class MaintenanceService: ObservableObject {
     public func runTask(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         let task = tasks[index]
+        let isDryRun = DryRunManager.shared.isEnabled
         
         tasks[index].status = .running
-        tasks[index].outputLog = "Starting execution...\nCommand: \(task.terminalCommand)\n"
+        tasks[index].outputLog = isDryRun ?
+            "[DRY-RUN MODE ACTIVE]\nSimulating execution...\nCommand: \(task.terminalCommand)\n" :
+            "Starting execution...\nCommand: \(task.terminalCommand)\n"
         isRunningAny = true
         activeTaskId = id
+        
+        if isDryRun {
+            DryRunManager.shared.logSimulation(action: "Maintenance Task", target: task.title)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self = self, let idx = self.tasks.firstIndex(where: { $0.id == id }) else { return }
+                self.tasks[idx].lastRun = Date()
+                self.tasks[idx].outputLog += "\n[DRY-RUN SIMULATION COMPLETE]: No system parameters modified."
+                self.tasks[idx].status = .success(message: "[Dry-Run] Simulated task successfully!")
+                self.isRunningAny = false
+                self.activeTaskId = nil
+            }
+            return
+        }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }

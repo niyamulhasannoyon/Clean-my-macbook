@@ -14,6 +14,7 @@ public class LargeOldFilesScanner: ObservableObject {
     @Published public var scannedCount: Int = 0
     @Published public var lastCleanResult: CleanResult? = nil
     @Published public var showCelebration: Bool = false
+    @Published public var scanError: String? = nil
     
     // Filters and Sorting
     @Published public var selectedCategory: String = "All"
@@ -238,6 +239,19 @@ public class LargeOldFilesScanner: ObservableObject {
     
     // MARK: - Actions: Move to Trash (Single)
     public func moveToTrash(item: LargeOldFileItem) {
+        if let protErr = PathProtection.evaluatePath(url: item.url) {
+            statusMessage = "Cannot delete protected file: \(protErr.localizedDescription)"
+            scanError = protErr.localizedDescription
+            return
+        }
+        
+        if DryRunManager.shared.isEnabled {
+            DryRunManager.shared.logSimulation(action: "Move to Trash", target: item.path)
+            files.removeAll { $0.id == item.id }
+            statusMessage = "[Dry-Run] Simulated moving '\(item.name)' to Trash."
+            return
+        }
+        
         let fm = FileManager.default
         do {
             try fm.trashItem(at: item.url, resultingItemURL: nil)
@@ -246,6 +260,7 @@ public class LargeOldFilesScanner: ObservableObject {
             StorageModel.shared.refresh()
         } catch {
             statusMessage = "Failed to move '\(item.name)' to Trash: \(error.localizedDescription)"
+            scanError = error.localizedDescription
         }
     }
     
@@ -253,7 +268,8 @@ public class LargeOldFilesScanner: ObservableObject {
     public func moveSelectedToTrash() async {
         guard !isCleaning else { return }
         isCleaning = true
-        statusMessage = "Moving selected files to macOS Trash..."
+        let isDryRun = DryRunManager.shared.isEnabled
+        statusMessage = isDryRun ? "Simulating file cleanup (Dry-Run mode)..." : "Moving selected files to macOS Trash..."
         
         let startTime = Date()
         var reclaimedBytes: Int64 = 0
@@ -264,14 +280,27 @@ public class LargeOldFilesScanner: ObservableObject {
         let fm = FileManager.default
         
         for item in itemsToTrash {
-            do {
-                try fm.trashItem(at: item.url, resultingItemURL: nil)
+            if let protErr = PathProtection.evaluatePath(url: item.url) {
+                print("Skipping protected file: \(item.path) - \(protErr.localizedDescription)")
+                errorsCount += 1
+                continue
+            }
+            
+            if isDryRun {
+                DryRunManager.shared.logSimulation(action: "Move to Trash", target: item.path)
                 reclaimedBytes += item.size
                 reclaimedCount += 1
                 files.removeAll { $0.id == item.id }
-            } catch {
-                errorsCount += 1
-                print("Error trashing \(item.path): \(error.localizedDescription)")
+            } else {
+                do {
+                    try fm.trashItem(at: item.url, resultingItemURL: nil)
+                    reclaimedBytes += item.size
+                    reclaimedCount += 1
+                    files.removeAll { $0.id == item.id }
+                } catch {
+                    errorsCount += 1
+                    print("Error trashing \(item.path): \(error.localizedDescription)")
+                }
             }
         }
         
@@ -281,13 +310,16 @@ public class LargeOldFilesScanner: ObservableObject {
             reclaimedFilesCount: reclaimedCount,
             errorsCount: errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: [:]
+            cleanedCategorySizes: [:],
+            isDryRun: isDryRun
         )
         
         self.lastCleanResult = result
         self.isCleaning = false
         self.showCelebration = true
-        self.statusMessage = "Successfully moved \(reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
+        self.statusMessage = isDryRun ?
+            "Dry-Run: Simulated \(reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
         
         StorageModel.shared.refresh()
     }

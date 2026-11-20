@@ -18,8 +18,24 @@ public struct SystemJunkView: View {
                         statusColor: headerStatusColor
                     )
                     
+                    // Dry-Run Simulation Notice
+                    DryRunBanner()
+                    
                     // Full Disk Access Banner
                     FDAPermissionBanner(featureName: "System Junk Scan & Clean")
+                    
+                    // Module Error Banner
+                    if let err = scanner.scanError {
+                        ModuleErrorBanner(
+                            message: err,
+                            onRetry: {
+                                Task { await scanner.startScan() }
+                            },
+                            onDismiss: {
+                                scanner.scanError = nil
+                            }
+                        )
+                    }
                     
                     // Top Overview & Action Control Bar
                     VStack(spacing: 14) {

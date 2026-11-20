@@ -22,8 +22,24 @@ public struct AppUninstallerView: View {
                         statusColor: .orange
                     )
                     
+                    // Dry-Run Simulation Notice
+                    DryRunBanner()
+                    
                     // Full Disk Access Banner
                     FDAPermissionBanner(featureName: "App Uninstaller & Residual Removal")
+                    
+                    // Error Banner
+                    if let err = scanner.scanError {
+                        ModuleErrorBanner(
+                            message: err,
+                            onRetry: {
+                                Task { await scanner.scanAll() }
+                            },
+                            onDismiss: {
+                                scanner.scanError = nil
+                            }
+                        )
+                    }
                     
                     // Main Tab Selector & Action Control Bar
                     HStack(spacing: 12) {

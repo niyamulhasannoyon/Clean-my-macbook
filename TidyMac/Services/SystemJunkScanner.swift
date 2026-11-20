@@ -32,44 +32,8 @@ public enum JunkScanEngine {
     }
     
     public static func calculateSizeFast(of url: URL, fm: FileManager = .default) -> (bytes: Int64, filesCount: Int) {
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
-            return (0, 0)
-        }
-        
-        if !isDir.boolValue {
-            if let vals = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]) {
-                let sz = Int64(vals.totalFileAllocatedSize ?? vals.fileAllocatedSize ?? vals.fileSize ?? 0)
-                return (sz, 1)
-            }
-            return (0, 1)
-        }
-        
-        var totalBytes: Int64 = 0
-        var totalFiles: Int = 0
-        
-        let resourceKeys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey]
-        
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: Array(resourceKeys),
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else {
-            return (0, 0)
-        }
-        
-        for case let fileURL as URL in enumerator {
-            if let vals = try? fileURL.resourceValues(forKeys: resourceKeys) {
-                if vals.isRegularFile == true {
-                    totalFiles += 1
-                    let sz = Int64(vals.totalFileAllocatedSize ?? vals.fileAllocatedSize ?? vals.fileSize ?? 0)
-                    totalBytes += sz
-                }
-            }
-        }
-        
-        return (totalBytes, totalFiles)
+        let res = SizeCalculator.calculateSize(of: url, fm: fm)
+        return (res.bytes, res.filesCount)
     }
     
     // MARK: 1. User Caches
@@ -606,7 +570,8 @@ public class SystemJunkScanner: ObservableObject {
     public func performClean() async {
         guard !isCleaning else { return }
         isCleaning = true
-        currentScanningStep = "Moving selected junk to macOS Trash..."
+        let isDryRun = DryRunManager.shared.isEnabled
+        currentScanningStep = isDryRun ? "Simulating junk cleanup (Dry-Run mode)..." : "Moving selected junk to macOS Trash..."
         
         let startTime = Date()
         var reclaimedBytes: Int64 = 0
@@ -625,22 +590,38 @@ public class SystemJunkScanner: ObservableObject {
             
             for item in categories[catIdx].items {
                 if item.isSelected {
-                    do {
-                        if item.path.path.hasPrefix(homeTrashPath) {
-                            // Already in trash -> remove to empty trash item
-                            try fm.removeItem(at: item.path)
-                        } else {
-                            // Move to macOS Trash safely!
-                            try fm.trashItem(at: item.path, resultingItemURL: nil)
-                        }
-                        
+                    // Safety check against critical system paths
+                    if let protErr = PathProtection.evaluatePath(url: item.path) {
+                        print("Skipping protected path: \(item.path.path) - \(protErr.localizedDescription)")
+                        errorsCount += 1
+                        remainingItems.append(item)
+                        continue
+                    }
+                    
+                    if isDryRun {
+                        DryRunManager.shared.logSimulation(action: "Trash Junk Item", target: item.path.path)
                         reclaimedBytes += item.size
                         reclaimedFiles += max(1, item.fileCount)
                         catReclaimedForType += item.size
-                    } catch {
-                        print("Error trashing \(item.path.path): \(error.localizedDescription)")
-                        errorsCount += 1
-                        remainingItems.append(item)
+                        // Item simulated as removed
+                    } else {
+                        do {
+                            if item.path.path.hasPrefix(homeTrashPath) {
+                                // Already in trash -> remove to empty trash item
+                                try fm.removeItem(at: item.path)
+                            } else {
+                                // Move to macOS Trash safely!
+                                try fm.trashItem(at: item.path, resultingItemURL: nil)
+                            }
+                            
+                            reclaimedBytes += item.size
+                            reclaimedFiles += max(1, item.fileCount)
+                            catReclaimedForType += item.size
+                        } catch {
+                            print("Error trashing \(item.path.path): \(error.localizedDescription)")
+                            errorsCount += 1
+                            remainingItems.append(item)
+                        }
                     }
                 } else {
                     remainingItems.append(item)
@@ -659,13 +640,16 @@ public class SystemJunkScanner: ObservableObject {
             reclaimedFilesCount: reclaimedFiles,
             errorsCount: errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: categoryReclaimed
+            cleanedCategorySizes: categoryReclaimed,
+            isDryRun: isDryRun
         )
         
         self.lastCleanResult = result
         self.isCleaning = false
         self.showReclaimedAnimation = true
-        self.currentScanningStep = "Clean completed: Safely moved \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) to Trash."
+        self.currentScanningStep = isDryRun ?
+            "Dry-Run complete: Simulated \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) across \(reclaimedFiles) items." :
+            "Clean completed: Safely moved \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) to Trash."
         
         // Refresh system storage model as well
         StorageModel.shared.refresh()

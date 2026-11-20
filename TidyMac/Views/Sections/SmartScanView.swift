@@ -21,8 +21,24 @@ public struct SmartScanView: View {
                         statusColor: headerStatusColor
                     )
                     
+                    // Dry-Run Simulation Notice
+                    DryRunBanner()
+                    
                     // Full Disk Access Alert Banner
                     FDAPermissionBanner(featureName: "Smart Scan")
+                    
+                    // Error Banner
+                    if let err = coordinator.errorMessage {
+                        ModuleErrorBanner(
+                            message: err,
+                            onRetry: {
+                                Task { await coordinator.startSmartScan() }
+                            },
+                            onDismiss: {
+                                coordinator.errorMessage = nil
+                            }
+                        )
+                    }
                     
                     // Main Hero Section (Idle / Scanning / Completed Summary)
                     heroVisualizerCard

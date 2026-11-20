@@ -182,19 +182,22 @@ public struct CleanResult: Equatable {
     public let errorsCount: Int
     public let duration: TimeInterval
     public let cleanedCategorySizes: [JunkCategoryType: Int64]
+    public let isDryRun: Bool
     
     public init(
         reclaimedBytes: Int64,
         reclaimedFilesCount: Int,
         errorsCount: Int,
         duration: TimeInterval,
-        cleanedCategorySizes: [JunkCategoryType: Int64] = [:]
+        cleanedCategorySizes: [JunkCategoryType: Int64] = [:],
+        isDryRun: Bool = false
     ) {
         self.reclaimedBytes = reclaimedBytes
         self.reclaimedFilesCount = reclaimedFilesCount
         self.errorsCount = errorsCount
         self.duration = duration
         self.cleanedCategorySizes = cleanedCategorySizes
+        self.isDryRun = isDryRun
     }
     
     public var formattedReclaimedSize: String {

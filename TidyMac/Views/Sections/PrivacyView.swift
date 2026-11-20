@@ -14,8 +14,24 @@ struct PrivacyView: View {
                     statusColor: .purple
                 )
                 
+                // Dry-Run Notice
+                DryRunBanner()
+                
                 // Full Disk Access Banner
                 FDAPermissionBanner(featureName: "Browser History & Privacy Traces")
+                
+                // Module Error Banner
+                if let err = scanner.scanError {
+                    ModuleErrorBanner(
+                        message: err,
+                        onRetry: {
+                            scanner.scan()
+                        },
+                        onDismiss: {
+                            scanner.scanError = nil
+                        }
+                    )
+                }
                 
                 // Running Browser Warning Banner
                 if let runningBrowser = scanner.runningBrowserWarning {

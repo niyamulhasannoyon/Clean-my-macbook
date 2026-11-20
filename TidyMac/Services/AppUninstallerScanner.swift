@@ -24,6 +24,7 @@ public class AppUninstallerScanner: ObservableObject {
     
     @Published public var lastCleanResult: CleanResult? = nil
     @Published public var showCelebration: Bool = false
+    @Published public var scanError: String? = nil
     
     private let fileManager = FileManager.default
     private let homeURL = FileManager.default.homeDirectoryForCurrentUser
@@ -637,7 +638,10 @@ public class AppUninstallerScanner: ObservableObject {
     public func trashApp(app: InstalledApp, trashBundle: Bool = true) async -> Bool {
         guard !isCleaning else { return false }
         isCleaning = true
-        statusMessage = "Safely moving \(app.name) and selected leftovers to macOS Trash..."
+        let isDryRun = DryRunManager.shared.isEnabled
+        statusMessage = isDryRun ?
+            "Simulating uninstallation of \(app.name)..." :
+            "Safely moving \(app.name) and selected leftovers to macOS Trash..."
         
         let startTime = Date()
         var reclaimedBytes: Int64 = 0
@@ -645,8 +649,8 @@ public class AppUninstallerScanner: ObservableObject {
         var errorsCount: Int = 0
         let fm = self.fileManager
         
-        // 1. Terminate running instance if open
-        if !app.bundleIdentifier.isEmpty {
+        // 1. Terminate running instance if open (skip if dry run)
+        if !isDryRun && !app.bundleIdentifier.isEmpty {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier)
             for rApp in runningApps {
                 rApp.terminate()
@@ -655,29 +659,50 @@ public class AppUninstallerScanner: ObservableObject {
         
         // 2. Trash Selected Leftover Files
         for item in app.leftovers where item.isSelected {
-            do {
-                if fm.fileExists(atPath: item.url.path) {
-                    try fm.trashItem(at: item.url, resultingItemURL: nil)
-                    reclaimedBytes += item.size
-                    reclaimedFiles += max(1, item.fileCount)
-                }
-            } catch {
-                print("Error moving leftover to Trash: \(item.url.path) - \(error.localizedDescription)")
+            if let protErr = PathProtection.evaluatePath(url: item.url) {
+                print("Skipping protected leftover: \(item.url.path) - \(protErr.localizedDescription)")
                 errorsCount += 1
+                continue
+            }
+            
+            if isDryRun {
+                DryRunManager.shared.logSimulation(action: "Trash Leftover", target: item.url.path)
+                reclaimedBytes += item.size
+                reclaimedFiles += max(1, item.fileCount)
+            } else {
+                do {
+                    if fm.fileExists(atPath: item.url.path) {
+                        try fm.trashItem(at: item.url, resultingItemURL: nil)
+                        reclaimedBytes += item.size
+                        reclaimedFiles += max(1, item.fileCount)
+                    }
+                } catch {
+                    print("Error moving leftover to Trash: \(item.url.path) - \(error.localizedDescription)")
+                    errorsCount += 1
+                }
             }
         }
         
         // 3. Trash Application Bundle
         if trashBundle && !app.isSystemApp {
-            do {
-                if fm.fileExists(atPath: app.bundleURL.path) {
-                    try fm.trashItem(at: app.bundleURL, resultingItemURL: nil)
-                    reclaimedBytes += app.appSize
-                    reclaimedFiles += 1
-                }
-            } catch {
-                print("Error moving app bundle to Trash: \(app.bundleURL.path) - \(error.localizedDescription)")
+            if let protErr = PathProtection.evaluatePath(url: app.bundleURL) {
+                print("Cannot delete protected application: \(app.bundleURL.path) - \(protErr.localizedDescription)")
                 errorsCount += 1
+            } else if isDryRun {
+                DryRunManager.shared.logSimulation(action: "Trash App Bundle", target: app.bundleURL.path)
+                reclaimedBytes += app.appSize
+                reclaimedFiles += 1
+            } else {
+                do {
+                    if fm.fileExists(atPath: app.bundleURL.path) {
+                        try fm.trashItem(at: app.bundleURL, resultingItemURL: nil)
+                        reclaimedBytes += app.appSize
+                        reclaimedFiles += 1
+                    }
+                } catch {
+                    print("Error moving app bundle to Trash: \(app.bundleURL.path) - \(error.localizedDescription)")
+                    errorsCount += 1
+                }
             }
         }
         
@@ -687,7 +712,8 @@ public class AppUninstallerScanner: ObservableObject {
             reclaimedFilesCount: reclaimedFiles,
             errorsCount: errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: [:]
+            cleanedCategorySizes: [:],
+            isDryRun: isDryRun
         )
         
         // Remove app from local list
@@ -699,7 +725,9 @@ public class AppUninstallerScanner: ObservableObject {
         self.lastCleanResult = result
         self.isCleaning = false
         self.showCelebration = true
-        self.statusMessage = "Uninstalled \(app.name). Reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) moved to macOS Trash."
+        self.statusMessage = isDryRun ?
+            "Dry-Run: Simulated uninstallation of \(app.name) (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
+            "Uninstalled \(app.name). Reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) moved to macOS Trash."
         
         // Refresh StorageModel
         StorageModel.shared.refresh()
@@ -710,7 +738,10 @@ public class AppUninstallerScanner: ObservableObject {
     public func trashSelectedOrphans() async -> Bool {
         guard !isCleaning else { return false }
         isCleaning = true
-        statusMessage = "Safely moving selected orphaned leftover files to macOS Trash..."
+        let isDryRun = DryRunManager.shared.isEnabled
+        statusMessage = isDryRun ?
+            "Simulating orphaned leftover removal (Dry-Run mode)..." :
+            "Safely moving selected orphaned leftover files to macOS Trash..."
         
         let startTime = Date()
         var reclaimedBytes: Int64 = 0
@@ -725,16 +756,29 @@ public class AppUninstallerScanner: ObservableObject {
                 var remainingItems: [AppLeftoverItem] = []
                 for item in group.items {
                     if item.isSelected {
-                        do {
-                            if fm.fileExists(atPath: item.url.path) {
-                                try fm.trashItem(at: item.url, resultingItemURL: nil)
-                                reclaimedBytes += item.size
-                                reclaimedFiles += max(1, item.fileCount)
-                            }
-                        } catch {
-                            print("Error moving orphan to Trash: \(item.url.path) - \(error.localizedDescription)")
+                        if let protErr = PathProtection.evaluatePath(url: item.url) {
+                            print("Skipping protected orphan: \(item.url.path) - \(protErr.localizedDescription)")
                             errorsCount += 1
                             remainingItems.append(item)
+                            continue
+                        }
+                        
+                        if isDryRun {
+                            DryRunManager.shared.logSimulation(action: "Trash Orphaned Item", target: item.url.path)
+                            reclaimedBytes += item.size
+                            reclaimedFiles += max(1, item.fileCount)
+                        } else {
+                            do {
+                                if fm.fileExists(atPath: item.url.path) {
+                                    try fm.trashItem(at: item.url, resultingItemURL: nil)
+                                    reclaimedBytes += item.size
+                                    reclaimedFiles += max(1, item.fileCount)
+                                }
+                            } catch {
+                                print("Error moving orphan to Trash: \(item.url.path) - \(error.localizedDescription)")
+                                errorsCount += 1
+                                remainingItems.append(item)
+                            }
                         }
                     } else {
                         remainingItems.append(item)
@@ -758,15 +802,17 @@ public class AppUninstallerScanner: ObservableObject {
             reclaimedFilesCount: reclaimedFiles,
             errorsCount: errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: [:]
+            cleanedCategorySizes: [:],
+            isDryRun: isDryRun
         )
         
         self.lastCleanResult = result
         self.isCleaning = false
         self.showCelebration = true
-        self.statusMessage = "Cleaned orphaned residuals. Reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) moved to macOS Trash."
+        self.statusMessage = isDryRun ?
+            "Dry-Run: Simulated \(reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
         
-        // Refresh StorageModel
         StorageModel.shared.refresh()
         return errorsCount == 0
     }

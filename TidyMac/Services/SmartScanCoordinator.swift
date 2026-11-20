@@ -13,6 +13,7 @@ public final class SmartScanCoordinator: ObservableObject {
     @Published public var lastCleanResult: CleanResult? = nil
     @Published public var isShowingReviewSheet: Bool = false
     @Published public var activeReviewTab: SmartScanModule = .systemJunk
+    @Published public var errorMessage: String? = nil
     
     private let junkScanner = SystemJunkScanner.shared
     private let largeFilesScanner = LargeOldFilesScanner.shared
@@ -95,7 +96,8 @@ public final class SmartScanCoordinator: ObservableObject {
     public func performCleanAll() async {
         guard state == .completed else { return }
         
-        state = .cleaning(step: "Starting Smart Cleanup...", progress: 0.05)
+        let isDryRun = DryRunManager.shared.isEnabled
+        state = .cleaning(step: isDryRun ? "Simulating Smart Cleanup (Dry-Run mode)..." : "Starting Smart Cleanup...", progress: 0.05)
         progress = 0.05
         
         let startTime = Date()
@@ -105,7 +107,7 @@ public final class SmartScanCoordinator: ObservableObject {
         
         // 1. Clean System Junk
         if summary.isJunkSelected {
-            state = .cleaning(step: "Cleaning System Junk & Caches...", progress: 0.25)
+            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating System Junk cleanup..." : "Cleaning System Junk & Caches...", progress: 0.25)
             progress = 0.25
             await junkScanner.performClean()
             if let junkResult = junkScanner.lastCleanResult {
@@ -117,7 +119,7 @@ public final class SmartScanCoordinator: ObservableObject {
         
         // 2. Clean Large Files
         if summary.isLargeFilesSelected && !largeFilesScanner.selectedFiles.isEmpty {
-            state = .cleaning(step: "Moving selected Large Files to Trash...", progress: 0.55)
+            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating Large Files removal..." : "Moving selected Large Files to Trash...", progress: 0.55)
             progress = 0.55
             await largeFilesScanner.moveSelectedToTrash()
             if let largeResult = largeFilesScanner.lastCleanResult {
@@ -129,7 +131,7 @@ public final class SmartScanCoordinator: ObservableObject {
         
         // 3. Clean Privacy Traces
         if summary.isPrivacySelected {
-            state = .cleaning(step: "Clearing browser cookies and history...", progress: 0.80)
+            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating privacy cleanup..." : "Clearing browser cookies and history...", progress: 0.80)
             progress = 0.80
             privacyScanner.clearSelected()
             totalReclaimed += summary.privacyBytes
@@ -138,15 +140,19 @@ public final class SmartScanCoordinator: ObservableObject {
         
         // 4. Optimize Performance & Flush Caches
         if summary.isPerformanceSelected {
-            state = .cleaning(step: "Optimizing memory & flushing DNS...", progress: 0.95)
+            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating RAM flush..." : "Optimizing memory & flushing DNS...", progress: 0.95)
             progress = 0.95
             
-            // Execute quick safe memory/resolver flush
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-            proc.arguments = ["-flushcache"]
-            try? proc.run()
-            proc.waitUntilExit()
+            if isDryRun {
+                DryRunManager.shared.logSimulation(action: "Flush Cache & Optimize RAM", target: "System Memory")
+            } else {
+                // Execute quick safe memory/resolver flush
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
+                proc.arguments = ["-flushcache"]
+                try? proc.run()
+                proc.waitUntilExit()
+            }
             
             totalReclaimed += summary.purgeableRAMBytes
         }
@@ -159,7 +165,8 @@ public final class SmartScanCoordinator: ObservableObject {
             reclaimedFilesCount: max(totalFilesCleaned, 15),
             errorsCount: errors,
             duration: elapsed,
-            cleanedCategorySizes: [:]
+            cleanedCategorySizes: [:],
+            isDryRun: isDryRun
         )
         
         self.lastCleanResult = finalResult

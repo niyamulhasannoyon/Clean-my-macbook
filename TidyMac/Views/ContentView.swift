@@ -4,6 +4,7 @@ struct ContentView: View {
     @State private var selectedItem: NavigationItem? = .smartScan
     @ObservedObject var storage = StorageModel.shared
     @ObservedObject var fdaManager = FullDiskAccessManager.shared
+    @ObservedObject var dryRun = DryRunManager.shared
     
     @AppStorage("hasSeenFDAOnboarding") private var hasSeenFDAOnboarding: Bool = false
     
@@ -39,6 +40,26 @@ struct ContentView: View {
             
             ToolbarItem(placement: .automatic) {
                 Button(action: {
+                    dryRun.isShowingSettingsSheet = true
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: dryRun.isEnabled ? "shield.checkered" : "shield")
+                            .foregroundColor(dryRun.isEnabled ? .orange : .secondary)
+                        Text(dryRun.isEnabled ? "Dry-Run: ON" : "Dry-Run")
+                            .font(.system(size: 11, weight: dryRun.isEnabled ? .bold : .regular))
+                            .foregroundColor(dryRun.isEnabled ? .orange : .secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background((dryRun.isEnabled ? Color.orange : Color.gray).opacity(dryRun.isEnabled ? 0.15 : 0.08))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(dryRun.isEnabled ? "Dry-Run is ACTIVE: deletions are simulated safely. Click to configure." : "Dry-Run mode simulates file deletions without touching files. Click to configure.")
+            }
+            
+            ToolbarItem(placement: .automatic) {
+                Button(action: {
                     storage.refresh()
                     fdaManager.checkAccess()
                 }) {
@@ -59,6 +80,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $fdaManager.isShowingOnboardingSheet) {
             FullDiskAccessOnboardingView()
+        }
+        .sheet(isPresented: $dryRun.isShowingSettingsSheet) {
+            SettingsView()
         }
         .onAppear {
             // Check FDA status on app launch; if missing, show onboarding guide

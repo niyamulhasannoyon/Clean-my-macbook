@@ -18,6 +18,7 @@ public final class DiskSpaceScanner: ObservableObject {
     @Published public var chartStyle: DiskChartStyle = .treemap
     @Published public var hoveredNode: DiskNode?
     @Published public var selectedNode: DiskNode?
+    @Published public var scanError: String? = nil
     
     public init() {
         // Initial setup with Home folder
