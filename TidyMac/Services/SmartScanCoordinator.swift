@@ -68,8 +68,8 @@ public final class SmartScanCoordinator: ObservableObject {
         try? await Task.sleep(nanoseconds: 300_000_000)
         let privBytes = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }.reduce(Int64(0)) { $0 + $1.sizeBytes }
         let privCount = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }.reduce(0) { $0 + $1.fileCount }
-        summary.privacyBytes = max(privBytes, 350 * 1024 * 1024) // Estimate realistic privacy cookies/cache if freshly cleared
-        summary.privacyFilesCount = max(privCount, 120)
+        summary.privacyBytes = privBytes
+        summary.privacyFilesCount = privCount
         
         // 4. Performance & Hardware Analysis
         progress = 0.90
@@ -79,9 +79,9 @@ public final class SmartScanCoordinator: ObservableObject {
         performanceMonitor.refreshHardwareStats()
         performanceMonitor.fetchLaunchItems()
         
-        // Calculate purgeable/inactive RAM estimate
+        // Memory metrics (reported separately as memory optimization, never conflated with disk space)
         let usedRAM = performanceMonitor.memory.usedBytes
-        summary.purgeableRAMBytes = max(Int64(Double(usedRAM) * 0.15), 512 * 1024 * 1024)
+        summary.purgeableRAMBytes = Int64(Double(usedRAM) * 0.15)
         summary.performanceTasksCount = maintenanceService.tasks.count
         
         progress = 1.0
@@ -133,9 +133,20 @@ public final class SmartScanCoordinator: ObservableObject {
         if summary.isPrivacySelected {
             state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating privacy cleanup..." : "Clearing browser cookies and history...", progress: 0.80)
             progress = 0.80
-            privacyScanner.clearSelected()
-            totalReclaimed += summary.privacyBytes
-            totalFilesCleaned += summary.privacyFilesCount
+            
+            // Check if any selected browser is currently open
+            let activeBrowsers = BrowserType.allCases.filter { b in
+                b != .recentItems && privacyScanner.isBrowserRunning(b) && privacyScanner.items.contains { $0.browser == b && $0.isEnabled && $0.isAvailable }
+            }
+            
+            if !activeBrowsers.isEmpty && !isDryRun {
+                AppLogger.cleanup.warning("Smart Scan: skipped privacy cleanup for active browsers to protect unsaved work: \(activeBrowsers.map { $0.rawValue })")
+            } else {
+                let (reclaimed, files, cleanErrors) = privacyScanner.performSynchronousClean()
+                totalReclaimed += reclaimed
+                totalFilesCleaned += files
+                errors += cleanErrors
+            }
         }
         
         // 4. Optimize Performance & Flush Caches
@@ -152,17 +163,17 @@ public final class SmartScanCoordinator: ObservableObject {
                 proc.arguments = ["-flushcache"]
                 try? proc.run()
                 proc.waitUntilExit()
+                AppLogger.performance.info("Smart Scan: flushed DNS cache")
             }
-            
-            totalReclaimed += summary.purgeableRAMBytes
+            // Purgeable RAM is memory, NOT disk storage: do not add to totalReclaimed disk bytes!
         }
         
         progress = 1.0
         let elapsed = Date().timeIntervalSince(startTime)
         
         let finalResult = CleanResult(
-            reclaimedBytes: max(totalReclaimed, summary.totalCleanableBytes),
-            reclaimedFilesCount: max(totalFilesCleaned, 15),
+            reclaimedBytes: totalReclaimed,
+            reclaimedFilesCount: totalFilesCleaned,
             errorsCount: errors,
             duration: elapsed,
             cleanedCategorySizes: [:],

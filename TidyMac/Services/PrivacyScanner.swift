@@ -12,6 +12,8 @@ public final class PrivacyScanner: ObservableObject {
     @Published public var showSuccessAlert: Bool = false
     @Published public var runningBrowserWarning: BrowserType? = nil
     @Published public var scanError: String? = nil
+    @Published public var deletionErrors: [String] = []
+    @Published public var lastErrorsCount: Int = 0
     
     private let home = FileManager.default.homeDirectoryForCurrentUser
     
@@ -363,6 +365,65 @@ public final class PrivacyScanner: ObservableObject {
         return (count, bytes)
     }
     
+    // MARK: - Safe Item Deletion Helpers
+    private func safelyDelete(url: URL, itemTitle: String) -> (success: Bool, reclaimed: Int64, error: String?) {
+        guard !PathProtection.isProtected(url: url) else {
+            let msg = "Refusing to delete protected path: \(url.path)"
+            AppLogger.security.warning("\(msg)")
+            return (false, 0, msg)
+        }
+        
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return (true, 0, nil)
+        }
+        
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let sizeBytes = Int64(size)
+        
+        // 1. Prefer moving to Trash so users can undo if needed
+        do {
+            try fm.trashItem(at: url, resultingItemURL: nil)
+            DeletionLogManager.shared.log(
+                sourceModule: "Privacy",
+                path: url.path,
+                sizeBytes: sizeBytes,
+                destination: .trash,
+                isSuccess: true
+            )
+            AppLogger.cleanup.info("Moved privacy item to Trash: \(url.path)")
+            return (true, sizeBytes, nil)
+        } catch {
+            AppLogger.cleanup.debug("trashItem failed for \(url.path), falling back to removeItem: \(error.localizedDescription)")
+        }
+        
+        // 2. Direct removal fallback
+        do {
+            try fm.removeItem(at: url)
+            DeletionLogManager.shared.log(
+                sourceModule: "Privacy",
+                path: url.path,
+                sizeBytes: sizeBytes,
+                destination: .permanent,
+                isSuccess: true
+            )
+            AppLogger.cleanup.info("Removed privacy file: \(url.path)")
+            return (true, sizeBytes, nil)
+        } catch {
+            let errorMsg = "Failed to remove \(url.lastPathComponent): \(error.localizedDescription)"
+            DeletionLogManager.shared.log(
+                sourceModule: "Privacy",
+                path: url.path,
+                sizeBytes: sizeBytes,
+                destination: .permanent,
+                isSuccess: false,
+                errorMessage: errorMsg
+            )
+            AppLogger.cleanup.error("\(errorMsg)")
+            return (false, 0, errorMsg)
+        }
+    }
+
     // MARK: - Cleaning Selected Items
     public func clearSelected() {
         // First check if any selected browser is currently running
@@ -377,96 +438,140 @@ public final class PrivacyScanner: ObservableObject {
         isClearing = true
         showSuccessAlert = false
         scanError = nil
-        let isDryRun = DryRunManager.shared.isEnabled
+        deletionErrors.removeAll()
+        lastErrorsCount = 0
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            var totalReclaimed: Int64 = 0
-            
-            for item in self.items where item.isEnabled {
-                totalReclaimed += item.sizeBytes
-                
-                if isDryRun {
-                    DryRunManager.shared.logSimulation(action: "Clean Privacy Trace", target: item.title)
-                    continue
-                }
-                
-                if item.browser == .firefox {
-                    self.clearFirefoxItem(item: item)
-                } else {
-                    for relPath in item.relativePaths {
-                        let fullURL = self.home.appendingPathComponent(relPath)
-                        let path = fullURL.path
-                        
-                        if PathProtection.isProtected(url: fullURL) {
-                            print("Skipping protected privacy path: \(path)")
-                            continue
-                        }
-                        
-                        var isDir: ObjCBool = false
-                        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir) {
-                            if isDir.boolValue {
-                                if let contents = try? FileManager.default.contentsOfDirectory(at: fullURL, includingPropertiesForKeys: nil) {
-                                    for file in contents {
-                                        if !PathProtection.isProtected(url: file) {
-                                            try? FileManager.default.removeItem(at: file)
-                                        }
-                                    }
-                                }
-                            } else {
-                                try? FileManager.default.removeItem(at: fullURL)
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Restart sharedfilelistd if recent items cleared (skip if dry-run)
-            if !isDryRun && self.items.contains(where: { $0.browser == .recentItems && $0.isEnabled }) {
-                let killTask = Process()
-                killTask.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-                killTask.arguments = ["sharedfilelistd"]
-                try? killTask.run()
-                killTask.waitUntilExit()
-            }
+            let (totalReclaimed, _, errorsCount) = self.performSynchronousClean()
             
             DispatchQueue.main.async {
                 self.lastReclaimedBytes = totalReclaimed
+                self.lastErrorsCount = errorsCount
                 self.isClearing = false
-                self.showSuccessAlert = true
+                self.showSuccessAlert = (errorsCount == 0)
+                if errorsCount > 0 {
+                    self.scanError = "\(errorsCount) privacy item(s) could not be removed (files may be locked or permission restricted)."
+                }
                 self.scan()
             }
         }
     }
     
-    private func clearFirefoxItem(item: PrivacyItem) {
-        let profilesURL = home.appendingPathComponent("Library/Application Support/Firefox/Profiles")
-        guard let profiles = try? FileManager.default.contentsOfDirectory(at: profilesURL, includingPropertiesForKeys: nil) else {
-            return
+    /// Synchronously cleans selected privacy items and returns accurate stats
+    public func performSynchronousClean() -> (reclaimedBytes: Int64, filesCount: Int, errorsCount: Int) {
+        let isDryRun = DryRunManager.shared.isEnabled
+        var totalReclaimed: Int64 = 0
+        var totalFilesCleaned: Int = 0
+        var errors: [String] = []
+        
+        for item in self.items where item.isEnabled && item.isAvailable {
+            if isDryRun {
+                DryRunManager.shared.logSimulation(action: "Clean Privacy Trace", target: item.title)
+                totalReclaimed += item.sizeBytes
+                totalFilesCleaned += item.fileCount
+                continue
+            }
+            
+            if item.browser == .firefox {
+                let (bytes, files, errs) = self.clearFirefoxItem(item: item)
+                totalReclaimed += bytes
+                totalFilesCleaned += files
+                errors.append(contentsOf: errs)
+            } else {
+                for relPath in item.relativePaths {
+                    let fullURL = self.home.appendingPathComponent(relPath)
+                    let path = fullURL.path
+                    
+                    if PathProtection.isProtected(url: fullURL) {
+                        AppLogger.security.warning("Skipping protected privacy path: \(path)")
+                        continue
+                    }
+                    
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: path, isDirectory: &isDir) {
+                        if isDir.boolValue {
+                            if let contents = try? FileManager.default.contentsOfDirectory(at: fullURL, includingPropertiesForKeys: [.fileSizeKey]) {
+                                for file in contents {
+                                    let result = self.safelyDelete(url: file, itemTitle: item.title)
+                                    if result.success {
+                                        totalReclaimed += result.reclaimed
+                                        totalFilesCleaned += 1
+                                    } else if let err = result.error {
+                                        errors.append(err)
+                                    }
+                                }
+                            }
+                        } else {
+                            let result = self.safelyDelete(url: fullURL, itemTitle: item.title)
+                            if result.success {
+                                totalReclaimed += result.reclaimed
+                                totalFilesCleaned += 1
+                            } else if let err = result.error {
+                                errors.append(err)
+                            }
+                        }
+                    }
+                }
+            }
         }
         
+        // Restart sharedfilelistd if recent items cleared (skip if dry-run)
+        if !isDryRun && self.items.contains(where: { $0.browser == .recentItems && $0.isEnabled }) {
+            let killTask = Process()
+            killTask.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            killTask.arguments = ["sharedfilelistd"]
+            try? killTask.run()
+            killTask.waitUntilExit()
+        }
+        
+        DispatchQueue.main.async {
+            self.deletionErrors = errors
+            self.lastErrorsCount = errors.count
+        }
+        
+        return (totalReclaimed, totalFilesCleaned, errors.count)
+    }
+    
+    private func clearFirefoxItem(item: PrivacyItem) -> (reclaimedBytes: Int64, filesCount: Int, errors: [String]) {
+        let profilesURL = home.appendingPathComponent("Library/Application Support/Firefox/Profiles")
+        guard let profiles = try? FileManager.default.contentsOfDirectory(at: profilesURL, includingPropertiesForKeys: nil) else {
+            return (0, 0, [])
+        }
+        
+        var reclaimed: Int64 = 0
+        var count = 0
+        var errs: [String] = []
+        
         for profile in profiles {
+            var targetURLs: [URL] = []
             switch item.category {
             case .history:
                 let files = ["places.sqlite", "places.sqlite-wal", "places.sqlite-shm"]
-                for f in files {
-                    try? FileManager.default.removeItem(at: profile.appendingPathComponent(f))
-                }
+                targetURLs = files.map { profile.appendingPathComponent($0) }
             case .cookies:
                 let files = ["cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm"]
-                for f in files {
-                    try? FileManager.default.removeItem(at: profile.appendingPathComponent(f))
-                }
-                let storageURL = profile.appendingPathComponent("storage")
-                try? FileManager.default.removeItem(at: storageURL)
+                targetURLs = files.map { profile.appendingPathComponent($0) }
+                targetURLs.append(profile.appendingPathComponent("storage"))
             case .downloads:
-                let f = profile.appendingPathComponent("downloads.json")
-                try? FileManager.default.removeItem(at: f)
+                targetURLs.append(profile.appendingPathComponent("downloads.json"))
             case .recentCache:
                 let cacheURL = home.appendingPathComponent("Library/Caches/Firefox/Profiles").appendingPathComponent(profile.lastPathComponent)
-                try? FileManager.default.removeItem(at: cacheURL)
+                targetURLs.append(cacheURL)
+            }
+            
+            for url in targetURLs {
+                let res = safelyDelete(url: url, itemTitle: item.title)
+                if res.success {
+                    reclaimed += res.reclaimed
+                    count += 1
+                } else if let err = res.error {
+                    errs.append(err)
+                }
             }
         }
+        
+        return (reclaimed, count, errs)
     }
     
     // MARK: - Toggle Helpers

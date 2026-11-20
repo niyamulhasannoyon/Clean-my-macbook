@@ -277,17 +277,228 @@ func runSizeCalculationTests() -> Bool {
     return suite.printSummary()
 }
 
+// MARK: - 3. Security, Shell Escaping & Privilege Sanitization Tests
+func runSecurityAndEscapingTests() -> Bool {
+    let suite = TestSuite("Security & Shell Sanitization Logic")
+    let mockHome = URL(fileURLWithPath: "/Users/testuser")
+    
+    // Test 1: Valid launch item locations
+    suite.assert(
+        SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/com.apple.test.plist", homeDirectory: mockHome),
+        "Standard /Library/LaunchDaemons .plist path must be valid"
+    )
+    suite.assert(
+        SecurityEscaping.isValidLaunchItemPath("/Library/LaunchAgents/com.service.agent.plist", homeDirectory: mockHome),
+        "Standard /Library/LaunchAgents .plist path must be valid"
+    )
+    suite.assert(
+        SecurityEscaping.isValidLaunchItemPath("/Users/testuser/Library/LaunchAgents/com.user.agent.plist", homeDirectory: mockHome),
+        "User ~/Library/LaunchAgents .plist path must be valid"
+    )
+    suite.assert(
+        SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/com.service.plist.disabled", homeDirectory: mockHome),
+        "Launch daemon with .plist.disabled suffix must be valid"
+    )
+    
+    // Test 2: Invalid or dangerous launch item paths
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/etc/launchd.conf", homeDirectory: mockHome),
+        "Path outside allowed directories (/etc) must be rejected"
+    )
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/bin/sh", homeDirectory: mockHome),
+        "System executable (/bin/sh) must be rejected"
+    )
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/../../etc/passwd", homeDirectory: mockHome),
+        "Directory traversal /../ in path must be rejected"
+    )
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/malicious.sh", homeDirectory: mockHome),
+        "Non-plist extension (.sh) must be rejected"
+    )
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/test\0hidden.plist", homeDirectory: mockHome),
+        "Path containing null byte must be rejected"
+    )
+    suite.assert(
+        !SecurityEscaping.isValidLaunchItemPath("/Library/LaunchDaemons/test\ninjection.plist", homeDirectory: mockHome),
+        "Path containing newline must be rejected"
+    )
+    
+    // Test 3: POSIX single-quote shell escaping
+    let plainString = "/path/to/my file.plist"
+    suite.assert(
+        SecurityEscaping.posixShellQuote(plainString) == "'/path/to/my file.plist'",
+        "Plain path is cleanly wrapped in single quotes"
+    )
+    
+    let injectionString = "file.plist\" && rm -rf / && echo \""
+    let quotedInjection = SecurityEscaping.posixShellQuote(injectionString)
+    suite.assert(
+        quotedInjection == "'file.plist\" && rm -rf / && echo \"'",
+        "Double-quotes, ampersands, and commands cannot break single-quote enclosure"
+    )
+    
+    let singleQuoteInjection = "user's'file.plist"
+    let safeSingleQuote = SecurityEscaping.posixShellQuote(singleQuoteInjection)
+    suite.assert(
+        safeSingleQuote == "'user'\\''s'\\''file.plist'",
+        "Internal single quotes are safely escaped as '\\''"
+    )
+    
+    // Test 4: AppleScript string literal escaping
+    let scriptString = "echo \"Hello World\" \\ test"
+    let escapedScript = SecurityEscaping.appleScriptStringEscape(scriptString)
+    suite.assert(
+        escapedScript == "echo \\\"Hello World\\\" \\\\ test",
+        "AppleScript escaping correctly escapes double-quotes and backslashes"
+    )
+    
+    return suite.printSummary()
+}
+
+// MARK: - 4. Executable Lookup (No Shell Invocation) Tests
+func runExecutableLookupTests() -> Bool {
+    let suite = TestSuite("Executable Lookup Safety (No Subshells)")
+    
+    // Test 1: Standard binary resolution
+    let shPath = SecurityEscaping.findExecutable(named: "sh")
+    suite.assert(
+        shPath != nil && (shPath == "/bin/sh" || shPath == "/usr/bin/sh"),
+        "Resolves system binary 'sh' directly from disk: got \(shPath ?? "nil")"
+    )
+    
+    let zshPath = SecurityEscaping.findExecutable(named: "zsh")
+    suite.assert(
+        zshPath != nil && (zshPath == "/bin/zsh" || zshPath == "/usr/bin/zsh"),
+        "Resolves system binary 'zsh' directly from disk: got \(zshPath ?? "nil")"
+    )
+    
+    // Test 2: Non-existent tool returns nil safely
+    let bogus = SecurityEscaping.findExecutable(named: "tidymac_nonexistent_scanner_tool_xyz")
+    suite.assert(
+        bogus == nil,
+        "Non-existent tool name safely returns nil"
+    )
+    
+    // Test 3: Path injection attempts return nil immediately
+    let pathInjection = SecurityEscaping.findExecutable(named: "../../bin/sh")
+    suite.assert(
+        pathInjection == nil,
+        "Executable names with slashes are immediately rejected"
+    )
+    
+    let commandInjection = SecurityEscaping.findExecutable(named: "sh; whoami")
+    suite.assert(
+        commandInjection == nil,
+        "Executable names with shell separators are safely rejected"
+    )
+    
+    return suite.printSummary()
+}
+
+// MARK: - 5. Deletion & Activity Log Tests
+func runDeletionLogManagerTests() -> Bool {
+    let suite = TestSuite("Deletion & Activity Log Persistence")
+    
+    let manager = DeletionLogManager.shared
+    
+    // Test 1: Logging a simulated deletion
+    manager.log(
+        sourceModule: "TestModule",
+        path: "/tmp/testfile.log",
+        sizeBytes: 1024,
+        destination: .simulated,
+        isSuccess: true
+    )
+    
+    // Allow brief async persistence
+    usleep(50_000)
+    
+    suite.assert(
+        !manager.records.isEmpty,
+        "Deletion records are added to manager memory"
+    )
+    
+    if let first = manager.records.first {
+        suite.assert(
+            first.sourceModule == "TestModule" && first.sizeBytes == 1024,
+            "Logged record contains expected module and size"
+        )
+        suite.assert(
+            first.destination == .simulated && first.isSuccess == true,
+            "Logged record contains expected destination and status"
+        )
+    }
+    
+    // Test 2: Logging a Trash deletion
+    manager.log(
+        sourceModule: "Privacy",
+        path: "/tmp/cache.db",
+        sizeBytes: 2048,
+        destination: .trash,
+        isSuccess: true
+    )
+    
+    usleep(50_000)
+    suite.assert(
+        manager.records.contains { $0.destination == .trash && $0.sourceModule == "Privacy" },
+        "Trash deletion logged and queryable"
+    )
+    
+    return suite.printSummary()
+}
+
+// MARK: - 6. Smart Scan Truthfulness Tests
+func runSmartScanTruthfulnessTests() -> Bool {
+    let suite = TestSuite("Smart Scan Measurement Truthfulness (Zero Fake Space)")
+    
+    // Test 1: Storage Cleanable calculation strictly sums disk storage
+    var summary = SmartScanSummary()
+    summary.junkBytes = 100 * 1024 * 1024
+    summary.largeFilesBytes = 50 * 1024 * 1024
+    summary.privacyBytes = 10 * 1024 * 1024
+    summary.purgeableRAMBytes = 800 * 1024 * 1024 // 800 MB of inactive RAM
+    
+    suite.assert(
+        summary.totalCleanableBytes == (160 * 1024 * 1024),
+        "totalCleanableBytes strictly sums disk storage (160 MB) and excludes RAM"
+    )
+    
+    // Test 2: Deselecting junk updates cleanable disk total
+    summary.isJunkSelected = false
+    suite.assert(
+        summary.totalCleanableBytes == (60 * 1024 * 1024),
+        "Deselecting module properly excludes its bytes from disk cleanable total"
+    )
+    
+    // Test 3: Formatting matches cleanable disk bytes
+    suite.assert(
+        summary.formattedTotalCleanable.contains("62") || summary.formattedTotalCleanable.contains("60") || summary.formattedTotalCleanable.contains("63"),
+        "Formatted cleanable total reflects true disk bytes: got \(summary.formattedTotalCleanable)"
+    )
+    
+    return suite.printSummary()
+}
+
 // MARK: - Main Execution
 print("\n🚀 Starting TidyMac Unit Tests Execution...")
 let startTime = Date()
 
 let pathSuccess = runPathProtectionTests()
 let sizeSuccess = runSizeCalculationTests()
+let securitySuccess = runSecurityAndEscapingTests()
+let execSuccess = runExecutableLookupTests()
+let deletionLogSuccess = runDeletionLogManagerTests()
+let smartScanTruthSuccess = runSmartScanTruthfulnessTests()
 
 let elapsed = Date().timeIntervalSince(startTime)
+let allPassed = pathSuccess && sizeSuccess && securitySuccess && execSuccess && deletionLogSuccess && smartScanTruthSuccess
+
 print("========================================================")
-if pathSuccess && sizeSuccess {
-    print(String(format: "🎉 ALL UNIT TESTS PASSED in %.3f seconds!", elapsed))
+if allPassed {
+    print(String(format: "🎉 ALL 6 TEST SUITES PASSED in %.3f seconds!", elapsed))
     print("========================================================\n")
     exit(0)
 } else {

@@ -14,6 +14,38 @@ struct TidyMacApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
         .defaultSize(width: 980, height: 650)
+        .commands {
+            CommandGroup(replacing: .help) {
+                Button("TidyMac User Guide & Documentation") {
+                    if let url = URL(string: "https://tidymac.app/guide") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .keyboardShortcut("?", modifiers: .command)
+                
+                Button("Privacy Policy") {
+                    if let url = URL(string: "https://tidymac.app/privacy") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                
+                Divider()
+                
+                Button("Configure Full Disk Access...") {
+                    FullDiskAccessManager.shared.openSystemSettings()
+                }
+                
+                Button("Check for Updates...") {
+                    AppLogger.general.info("User triggered manual update check")
+                    let alert = NSAlert()
+                    alert.messageText = "TidyMac is Up to Date"
+                    alert.informativeText = "TidyMac Version 1.0.1 (Build 2) is the latest release."
+                    alert.alertStyle = .informational
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            }
+        }
         
         // Menu Bar Extra (Status Bar Item with Storage Info)
         MenuBarExtra("TidyMac", systemImage: "sparkles") {

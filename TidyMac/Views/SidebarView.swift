@@ -40,6 +40,8 @@ struct SidebarView: View {
                                     }
                                     .padding(.vertical, 3)
                                 }
+                                .accessibilityLabel(item.rawValue)
+                                .accessibilityHint("Navigates to the \(item.rawValue) module")
                             }
                         }
                     }
@@ -85,6 +87,8 @@ struct SidebarView: View {
                     .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Full Disk Access Setup Required")
+                .accessibilityHint("Opens the Full Disk Access permissions setup guide")
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
             }

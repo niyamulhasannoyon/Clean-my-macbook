@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct SettingsView: View {
     @ObservedObject var dryRun = DryRunManager.shared
+    @ObservedObject var deletionLog = DeletionLogManager.shared
     @Environment(\.dismiss) private var dismiss
     
     public init() {}
@@ -113,6 +114,73 @@ public struct SettingsView: View {
                         )
                     }
                     
+                    // Deletion & Activity History Section
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("DELETION & ACTIVITY HISTORY (\(deletionLog.records.count) RECORDS)")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            if !deletionLog.records.isEmpty {
+                                Button("Clear History") {
+                                    deletionLog.clearHistory()
+                                }
+                                .font(.caption2)
+                            }
+                        }
+                        
+                        if deletionLog.records.isEmpty {
+                            Text("No files have been deleted or trashed yet.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(8)
+                        } else {
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 6) {
+                                    ForEach(deletionLog.records.prefix(50)) { record in
+                                        HStack(spacing: 8) {
+                                            Image(systemName: record.destination == .trash ? "trash.fill" : "xmark.bin.fill")
+                                                .foregroundColor(record.destination == .trash ? .blue : (record.isSuccess ? .orange : .red))
+                                                .font(.system(size: 11))
+                                            
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                HStack(spacing: 4) {
+                                                    Text(record.sourceModule)
+                                                        .font(.system(size: 10, weight: .semibold))
+                                                        .foregroundColor(.primary)
+                                                    Text("•")
+                                                        .foregroundColor(.secondary)
+                                                    Text(record.destination.rawValue)
+                                                        .font(.system(size: 9))
+                                                        .foregroundColor(.secondary)
+                                                }
+                                                Text(record.path)
+                                                    .font(.system(size: 10, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                            }
+                                            
+                                            Spacer()
+                                            
+                                            Text(ByteCountFormatter.string(fromByteCount: record.sizeBytes, countStyle: .file))
+                                                .font(.system(size: 10, weight: .medium))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(.vertical, 2)
+                                        Divider()
+                                    }
+                                }
+                                .padding(10)
+                            }
+                            .frame(maxHeight: 160)
+                            .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                            .cornerRadius(8)
+                        }
+                    }
+                    
                     // Simulated Action History (if Dry-Run is active or has logs)
                     if !dryRun.simulatedActionsLog.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
@@ -149,7 +217,7 @@ public struct SettingsView: View {
                 .padding()
             }
         }
-        .frame(width: 540, height: 480)
+        .frame(width: 560, height: 560)
     }
 }
 

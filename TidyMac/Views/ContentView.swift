@@ -36,6 +36,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help(fdaManager.hasFullDiskAccess ? "Full Disk Access is active and verified." : "Full Disk Access is required for scanning. Click for setup guide.")
+                .accessibilityLabel(fdaManager.hasFullDiskAccess ? "Full Disk Access Granted" : "Full Disk Access Required")
+                .accessibilityHint("Opens the Full Disk Access permissions setup guide")
             }
             
             ToolbarItem(placement: .automatic) {
@@ -56,6 +58,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help(dryRun.isEnabled ? "Dry-Run is ACTIVE: deletions are simulated safely. Click to configure." : "Dry-Run mode simulates file deletions without touching files. Click to configure.")
+                .accessibilityLabel(dryRun.isEnabled ? "Dry-Run Simulation Mode Active" : "Dry-Run Mode Inactive")
+                .accessibilityHint("Opens settings to toggle simulation mode and review activity log")
             }
             
             ToolbarItem(placement: .automatic) {
@@ -66,6 +70,8 @@ struct ContentView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .help("Refresh Storage & System Stats")
+                .accessibilityLabel("Refresh Storage")
+                .accessibilityHint("Reloads disk usage metrics and Full Disk Access permissions")
             }
             
             ToolbarItem(placement: .primaryAction) {
@@ -76,6 +82,8 @@ struct ContentView: View {
                         .foregroundColor(.cyan)
                 }
                 .help("Run Smart Scan")
+                .accessibilityLabel("Smart Scan")
+                .accessibilityHint("Navigates to the all-in-one Smart Scan module")
             }
         }
         .sheet(isPresented: $fdaManager.isShowingOnboardingSheet) {

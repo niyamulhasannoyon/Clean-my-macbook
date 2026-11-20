@@ -3,6 +3,8 @@ import SwiftUI
 struct PrivacyView: View {
     @ObservedObject private var scanner = PrivacyScanner.shared
     @ObservedObject private var fdaManager = FullDiskAccessManager.shared
+    @State private var browserToQuit: BrowserType? = nil
+    @State private var showingQuitConfirmation: Bool = false
     
     var body: some View {
         ScrollView {
@@ -52,8 +54,8 @@ struct PrivacyView: View {
                         Spacer()
                         
                         Button("Quit \(runningBrowser.processName)") {
-                            scanner.quitBrowser(runningBrowser)
-                            scanner.runningBrowserWarning = nil
+                            browserToQuit = runningBrowser
+                            showingQuitConfirmation = true
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -191,7 +193,8 @@ struct PrivacyView: View {
                             
                             if isRunning && browser != .recentItems {
                                 Button("Quit App") {
-                                    scanner.quitBrowser(browser)
+                                    browserToQuit = browser
+                                    showingQuitConfirmation = true
                                 }
                                 .font(.caption.weight(.medium))
                                 .padding(.horizontal, 8)
@@ -330,6 +333,24 @@ struct PrivacyView: View {
                 .padding(.top, 10)
             }
             .padding(24)
+        }
+        .alert(isPresented: $showingQuitConfirmation) {
+            Alert(
+                title: Text("Quit \(browserToQuit?.rawValue ?? "Browser")?"),
+                message: Text("Closing the browser allows TidyMac to safely clear cache and cookies. Please make sure you have saved all open tabs and drafts before continuing."),
+                primaryButton: .destructive(Text("Quit \(browserToQuit?.processName ?? "Browser")")) {
+                    if let b = browserToQuit {
+                        scanner.quitBrowser(b)
+                        if scanner.runningBrowserWarning == b {
+                            scanner.runningBrowserWarning = nil
+                        }
+                    }
+                    browserToQuit = nil
+                },
+                secondaryButton: .cancel(Text("Keep Open")) {
+                    browserToQuit = nil
+                }
+            )
         }
     }
 }

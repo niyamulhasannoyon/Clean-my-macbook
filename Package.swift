@@ -19,7 +19,9 @@ let package = Package(
             exclude: [
                 "Resources/Info.plist",
                 "Resources/Assets.xcassets",
-                "Resources/AppIcon.icns"
+                "Resources/AppIcon.icns",
+                "Resources/TidyMac.entitlements",
+                "Resources/PrivacyInfo.xcprivacy"
             ]
         ),
         .executableTarget(

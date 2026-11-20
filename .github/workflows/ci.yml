@@ -1,0 +1,99 @@
+name: CI & Universal Release Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build, Test & Package Universal DMG
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode / Swift Toolchain
+        run: |
+          swift --version
+
+      - name: Run Unit Tests
+        run: |
+          echo "Running TidyMac automated test suites..."
+          swift run UnitTests
+
+      - name: Verify Hardened Runtime Entitlements & Privacy Manifest
+        run: |
+          echo "Verifying TidyMac.entitlements..."
+          plutil -lint TidyMac/Resources/TidyMac.entitlements
+          echo "Verifying PrivacyInfo.xcprivacy..."
+          plutil -lint TidyMac/Resources/PrivacyInfo.xcprivacy
+          echo "Verifying Info.plist..."
+          plutil -lint TidyMac/Resources/Info.plist
+
+      - name: Setup Developer ID Certificate (if configured)
+        if: env.DEVELOPER_ID_CERTIFICATE_BASE64 != ''
+        env:
+          DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "Importing Apple Developer ID Application certificate..."
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=temporary_build_password
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          
+          CERT_PATH=$RUNNER_TEMP/developer_id.p12
+          echo "$DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Package Universal Release DMG
+        env:
+          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+        run: |
+          chmod +x ./create_dmg.sh ./scripts/create_dmg.sh
+          ./create_dmg.sh
+
+      - name: Notarize DMG (Release Tags with Notary Credentials)
+        if: startsWith(github.ref, 'refs/tags/v') && env.NOTARY_API_KEY_BASE64 != ''
+        env:
+          NOTARY_API_KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "Submitting DMG to Apple Notary Service..."
+          KEY_PATH=$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8
+          echo "$NOTARY_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          
+          xcrun notarytool submit build/TidyMac.dmg \
+            --key "$KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+            
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple build/TidyMac.dmg
+          spctl --assess --type open --context context:primary-signature -v build/TidyMac.dmg
+
+      - name: Upload DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TidyMac-Universal-DMG
+          path: build/TidyMac.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release (On Tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/TidyMac.dmg
+          generate_release_notes: true
+          draft: false
+          prerelease: false

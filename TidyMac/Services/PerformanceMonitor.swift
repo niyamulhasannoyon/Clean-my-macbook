@@ -289,6 +289,19 @@ public final class PerformanceMonitor: ObservableObject {
         return label
     }
     
+    // MARK: - Safe Shell & Path Helpers (Delegated to SecurityEscaping)
+    public static func isValidLaunchItemPath(_ path: String) -> Bool {
+        return SecurityEscaping.isValidLaunchItemPath(path)
+    }
+    
+    public static func posixShellQuote(_ string: String) -> String {
+        return SecurityEscaping.posixShellQuote(string)
+    }
+    
+    public static func appleScriptStringEscape(_ string: String) -> String {
+        return SecurityEscaping.appleScriptStringEscape(string)
+    }
+    
     // MARK: - Toggle Launch Item Enable / Disable
     public func toggleLaunchItem(item: LaunchItem, enable: Bool) {
         guard let index = launchItems.firstIndex(where: { $0.id == item.id }) else { return }
@@ -301,6 +314,16 @@ public final class PerformanceMonitor: ObservableObject {
             guard let self = self else { return }
             var success = false
             var newPath = path
+            
+            if !PerformanceMonitor.isValidLaunchItemPath(path) {
+                AppLogger.security.error("Blocked launch item toggle for unsafe path: \(path)")
+                DispatchQueue.main.async {
+                    guard let idx = self.launchItems.firstIndex(where: { $0.id == item.id }) else { return }
+                    self.launchItems[idx].isToggling = false
+                    self.fetchLaunchItems()
+                }
+                return
+            }
             
             if isUserAgent {
                 // User Launch Agent: Can modify directly without root
@@ -336,22 +359,27 @@ public final class PerformanceMonitor: ObservableObject {
                 }
             } else {
                 // System item: Requires Administrator Privileges
-                let script: String
+                let target: String
+                let shellCommand: String
                 if enable {
-                    let target = path.hasSuffix(".disabled") ? String(path.dropLast(".disabled".count)) : path
-                    script = "mv -f \"\(path)\" \"\(target)\" && launchctl load \"\(target)\""
-                    newPath = target
+                    target = path.hasSuffix(".disabled") ? String(path.dropLast(".disabled".count)) : path
+                    shellCommand = "mv -f \(PerformanceMonitor.posixShellQuote(path)) \(PerformanceMonitor.posixShellQuote(target)) && /bin/launchctl load \(PerformanceMonitor.posixShellQuote(target))"
                 } else {
-                    let target = path + ".disabled"
-                    script = "launchctl unload \"\(path)\" && mv -f \"\(path)\" \"\(target)\""
-                    newPath = target
+                    target = path + ".disabled"
+                    shellCommand = "/bin/launchctl unload \(PerformanceMonitor.posixShellQuote(path)) && mv -f \(PerformanceMonitor.posixShellQuote(path)) \(PerformanceMonitor.posixShellQuote(target))"
                 }
+                newPath = target
                 
-                let source = "do shell script \"\(script)\" with administrator privileges"
+                let source = "do shell script \"\(PerformanceMonitor.appleScriptStringEscape(shellCommand))\" with administrator privileges"
                 var errorDict: NSDictionary?
                 if let appleScript = NSAppleScript(source: source) {
                     appleScript.executeAndReturnError(&errorDict)
                     success = (errorDict == nil)
+                    if let err = errorDict {
+                        AppLogger.security.warning("AppleScript launch item toggle error: \(err)")
+                    } else {
+                        AppLogger.security.info("Successfully toggled system launch item: \(target) (enable: \(enable))")
+                    }
                 }
             }
             

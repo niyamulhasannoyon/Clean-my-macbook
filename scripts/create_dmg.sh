@@ -2,8 +2,15 @@
 set -e
 
 # ==============================================================================
-# TidyMac DMG Packaging Script
-# Supports: native macOS 'hdiutil' (default) and 'create-dmg' (if available)
+# TidyMac Universal Release & DMG Packaging Pipeline
+# Features:
+#   - Universal Binary (arm64 + x86_64) compilation via SwiftPM + lipo
+#   - Bundles Info.plist, AppIcon.icns, and PrivacyInfo.xcprivacy
+#   - Hardened Runtime Code-Signing with TidyMac.entitlements
+#   - Supports Developer ID Application certificate signing
+#   - Automated Notarization via xcrun notarytool (when credentials provided)
+#   - Automated Ticket Stapling via xcrun stapler
+#   - DMG generation via create-dmg or native hdiutil
 # ==============================================================================
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,40 +21,61 @@ BUILD_DIR="$PROJECT_DIR/build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_OUTPUT="$BUILD_DIR/$APP_NAME.dmg"
 STAGING_DIR="$BUILD_DIR/dmg_staging"
+ENTITLEMENTS="$PROJECT_DIR/TidyMac/Resources/TidyMac.entitlements"
+
+SIGNING_IDENTITY="${DEVELOPER_ID_APPLICATION:-${SIGNING_IDENTITY:-"-"}}"
 
 echo "========================================================"
-echo "  🚀 Starting $APP_NAME DMG Creation Pipeline"
+echo "  🚀 Starting $APP_NAME Universal Release Pipeline"
+echo "========================================================"
+echo "  Target:        Universal Binary (arm64 + x86_64)"
+echo "  Signing ID:    $SIGNING_IDENTITY"
+echo "  Entitlements:  $ENTITLEMENTS"
 echo "========================================================"
 
-# Step 1: Ensure Release Build is Up-to-Date
-echo "📦 Step 1: Building Release binary (swift build -c release)..."
-swift build -c release
+mkdir -p "$BUILD_DIR"
 
-RELEASE_BIN="$PROJECT_DIR/.build/arm64-apple-macosx/release/$APP_NAME"
-if [ ! -f "$RELEASE_BIN" ]; then
-    # Fallback check for x86_64 or universal if on Intel
-    RELEASE_BIN=$(find "$PROJECT_DIR/.build" -type f -name "$APP_NAME" -path "*/release/*" | head -n 1)
-fi
+# ------------------------------------------------------------------------------
+# Step 1: Compile Universal Binary (arm64 and x86_64)
+# ------------------------------------------------------------------------------
+echo "📦 Step 1: Compiling Release binaries for Apple Silicon & Intel..."
 
-if [ -z "$RELEASE_BIN" ] || [ ! -f "$RELEASE_BIN" ]; then
-    echo "❌ Error: Release binary could not be found."
+echo "  Compiling for arm64..."
+swift build -c release --triple arm64-apple-macosx
+ARM64_BIN="$PROJECT_DIR/.build/arm64-apple-macosx/release/$APP_NAME"
+
+echo "  Compiling for x86_64..."
+swift build -c release --triple x86_64-apple-macosx
+X86_BIN="$PROJECT_DIR/.build/x86_64-apple-macosx/release/$APP_NAME"
+
+if [ ! -f "$ARM64_BIN" ] || [ ! -f "$X86_BIN" ]; then
+    echo "❌ Error: Could not compile both architecture slices."
     exit 1
 fi
-echo "  Found binary at: $RELEASE_BIN"
 
+UNIVERSAL_BIN="$BUILD_DIR/$APP_NAME-universal"
+echo "  Merging slices into Universal Binary using lipo..."
+lipo -create -output "$UNIVERSAL_BIN" "$ARM64_BIN" "$X86_BIN"
+echo "  Universal Binary verified:"
+lipo -info "$UNIVERSAL_BIN"
+
+# ------------------------------------------------------------------------------
 # Step 2: Ensure App Icon Exists
+# ------------------------------------------------------------------------------
 if [ ! -f "$PROJECT_DIR/AppIcon.icns" ]; then
     echo "🎨 Generating AppIcon.icns..."
     swift "$PROJECT_DIR/scripts/generate_app_icon.swift"
 fi
 
+# ------------------------------------------------------------------------------
 # Step 3: Assemble macOS Application Bundle
+# ------------------------------------------------------------------------------
 echo "📂 Step 2: Assembling $APP_BUNDLE..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-cp "$RELEASE_BIN" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$UNIVERSAL_BIN" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 if [ -f "$PROJECT_DIR/TidyMac/Resources/Info.plist" ]; then
@@ -58,20 +86,40 @@ if [ -f "$PROJECT_DIR/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
-# Ad-hoc code signing for local execution
-echo "🔏 Step 3: Code-signing $APP_NAME.app with ad-hoc signature..."
-codesign --force --deep --sign - "$APP_BUNDLE"
-codesign --verify --deep "$APP_BUNDLE"
+if [ -f "$PROJECT_DIR/TidyMac/Resources/PrivacyInfo.xcprivacy" ]; then
+    cp "$PROJECT_DIR/TidyMac/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/PrivacyInfo.xcprivacy"
+fi
 
-# Step 4: Prepare DMG Staging Directory
-echo "📁 Step 4: Staging DMG contents..."
+# ------------------------------------------------------------------------------
+# Step 4: Code Signing (Hardened Runtime + Entitlements)
+# ------------------------------------------------------------------------------
+echo "🔏 Step 3: Signing $APP_NAME.app with Hardened Runtime..."
+
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    echo "  Signing using Developer ID identity: $SIGNING_IDENTITY"
+    codesign --force --options runtime --deep --timestamp \
+        --entitlements "$ENTITLEMENTS" \
+        --sign "$SIGNING_IDENTITY" \
+        "$APP_BUNDLE"
+else
+    echo "⚠️  No Developer ID specified. Falling back to local ad-hoc signature."
+    echo "    NOTE: Ad-hoc builds run locally but will trigger Gatekeeper warnings on other Macs."
+    codesign --force --deep --sign - "$APP_BUNDLE"
+fi
+
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+echo "  Bundle signature valid."
+
+# ------------------------------------------------------------------------------
+# Step 5: Prepare DMG Staging Directory
+# ------------------------------------------------------------------------------
+echo "📁 Step 4: Staging DMG distribution contents..."
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
-# Include Volume Icon if available
 if [ -f "$PROJECT_DIR/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/AppIcon.icns" "$STAGING_DIR/.VolumeIcon.icns"
     if command -v SetFile &>/dev/null; then
@@ -79,11 +127,13 @@ if [ -f "$PROJECT_DIR/AppIcon.icns" ]; then
     fi
 fi
 
-# Step 5: Build DMG (create-dmg vs native hdiutil)
+# ------------------------------------------------------------------------------
+# Step 6: Build Disk Image (DMG)
+# ------------------------------------------------------------------------------
 rm -f "$DMG_OUTPUT"
 
 if command -v create-dmg &>/dev/null; then
-    echo "📀 Step 5: Building polished DMG with 'create-dmg'..."
+    echo "📀 Step 5: Building styled DMG with 'create-dmg'..."
     create-dmg \
         --volname "$APP_NAME" \
         --volicon "$PROJECT_DIR/AppIcon.icns" \
@@ -108,16 +158,33 @@ else
         "$DMG_OUTPUT"
 fi
 
-# Step 6: Cleanup Temporary Staging
 rm -rf "$STAGING_DIR"
 
+# ------------------------------------------------------------------------------
+# Step 7: Sign DMG & Notarize (if Developer ID provided)
+# ------------------------------------------------------------------------------
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    echo "🔏 Step 6: Code-signing DMG image..."
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$DMG_OUTPUT"
+    
+    if [ -n "$NOTARY_KEYCHAIN_PROFILE" ]; then
+        echo "☁️  Step 7: Submitting DMG to Apple Notarization Service (notarytool)..."
+        xcrun notarytool submit "$DMG_OUTPUT" --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" --wait
+        
+        echo "📎 Stapling notarization ticket to DMG..."
+        xcrun stapler staple "$DMG_OUTPUT"
+        
+        echo "🛡️  Gatekeeper Verification:"
+        spctl --assess --type open --context context:primary-signature -v "$DMG_OUTPUT"
+    else
+        echo "ℹ️  Tip: Set NOTARY_KEYCHAIN_PROFILE to automate Apple notarytool submission & stapling."
+    fi
+fi
+
 echo "========================================================"
-echo "  ✅ SUCCESS: DMG Created Successfully!"
+echo "  ✅ SUCCESS: Universal $APP_NAME DMG Ready!"
 echo "========================================================"
 echo "  Location: $DMG_OUTPUT"
 echo "  Size:     $(du -h "$DMG_OUTPUT" | cut -f1)"
 echo "  SHA-256:  $(shasum -a 256 "$DMG_OUTPUT" | cut -d' ' -f1)"
-echo "========================================================"
-echo "  To test opening the DMG:"
-echo "    open \"$DMG_OUTPUT\""
 echo "========================================================"
