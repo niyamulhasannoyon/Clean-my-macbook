@@ -10,7 +10,7 @@ on:
 jobs:
   build-and-test:
     name: Build, Test & Package Universal DMG
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - name: Checkout Repository
