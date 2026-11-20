@@ -1,14 +1,14 @@
 import SwiftUI
 
 struct DetailView: View {
-    let item: NavigationItem?
+    @Binding var selectedItem: NavigationItem?
     
     var body: some View {
         Group {
-            if let item = item {
+            if let item = selectedItem {
                 switch item {
                 case .smartScan:
-                    SmartScanView()
+                    SmartScanView(selectedNavigationItem: $selectedItem)
                 case .systemJunk:
                     SystemJunkView()
                 case .largeOldFiles:

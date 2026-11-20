@@ -11,7 +11,7 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView(selectedItem: $selectedItem)
         } detail: {
-            DetailView(item: selectedItem)
+            DetailView(selectedItem: $selectedItem)
         }
         .navigationTitle(selectedItem?.rawValue ?? "TidyMac")
         .toolbar {

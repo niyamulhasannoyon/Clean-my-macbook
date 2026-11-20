@@ -30,6 +30,12 @@
 		27FD1A7DD2404E278A57D0E0 /* FullDiskAccessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FC1E9FAB1004EED83505650 /* FullDiskAccessManager.swift */; };
 		F1884CC4E76C4BFE925DD660 /* SystemJunkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B330D76600FF41F0AAF18090 /* SystemJunkModels.swift */; };
 		3D77B26381D54693A76FBCC6 /* SystemJunkScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5483BF082BFE41C3AF21FE67 /* SystemJunkScanner.swift */; };
+		A20000000000000000000001 /* LargeOldFilesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* LargeOldFilesModels.swift */; };
+		A20000000000000000000002 /* LargeOldFilesScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* LargeOldFilesScanner.swift */; };
+		A20000000000000000000003 /* DuplicateModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* DuplicateModels.swift */; };
+		A20000000000000000000004 /* DuplicateScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* DuplicateScanner.swift */; };
+		A20000000000000000000005 /* AppUninstallerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* AppUninstallerModels.swift */; };
+		A20000000000000000000006 /* AppUninstallerScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000006 /* AppUninstallerScanner.swift */; };
 		FA8544EE0F224EFAB42CC704 /* FDAPermissionBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A43C2418D1444CA86CE4BD /* FDAPermissionBanner.swift */; };
 		60087247A34E405687C8A358 /* FullDiskAccessOnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B417297470AB476CB3C86260 /* FullDiskAccessOnboardingView.swift */; };
 		5C02E77AF7CA4FC0DF8ED2A8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4B009D2CB53AE26D0AE8ED2 /* Assets.xcassets */; };
@@ -43,6 +49,12 @@
 		3FC1E9FAB1004EED83505650 /* FullDiskAccessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FullDiskAccessManager.swift"; sourceTree = "<group>"; };
 		B330D76600FF41F0AAF18090 /* SystemJunkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SystemJunkModels.swift"; sourceTree = "<group>"; };
 		5483BF082BFE41C3AF21FE67 /* SystemJunkScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SystemJunkScanner.swift"; sourceTree = "<group>"; };
+		A10000000000000000000001 /* LargeOldFilesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LargeOldFilesModels.swift"; sourceTree = "<group>"; };
+		A10000000000000000000002 /* LargeOldFilesScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LargeOldFilesScanner.swift"; sourceTree = "<group>"; };
+		A10000000000000000000003 /* DuplicateModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DuplicateModels.swift"; sourceTree = "<group>"; };
+		A10000000000000000000004 /* DuplicateScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DuplicateScanner.swift"; sourceTree = "<group>"; };
+		A10000000000000000000005 /* AppUninstallerModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppUninstallerModels.swift"; sourceTree = "<group>"; };
+		A10000000000000000000006 /* AppUninstallerScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppUninstallerScanner.swift"; sourceTree = "<group>"; };
 		89A43C2418D1444CA86CE4BD /* FDAPermissionBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FDAPermissionBanner.swift"; sourceTree = "<group>"; };
 		B417297470AB476CB3C86260 /* FullDiskAccessOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FullDiskAccessOnboardingView.swift"; sourceTree = "<group>"; };
 		8D15D4F91DC3426BB5FC97DB /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView.swift"; sourceTree = "<group>"; };
@@ -120,6 +132,9 @@
 				16EDD40183FF52C284CE891D /* StorageModel.swift */,
 				3FC1E9FAB1004EED83505650 /* FullDiskAccessManager.swift */,
 				B330D76600FF41F0AAF18090 /* SystemJunkModels.swift */,
+				A10000000000000000000001 /* LargeOldFilesModels.swift */,
+				A10000000000000000000003 /* DuplicateModels.swift */,
+				A10000000000000000000005 /* AppUninstallerModels.swift */,
 			);
 			path = "Models";
 			sourceTree = "<group>";
@@ -128,6 +143,9 @@
 			isa = PBXGroup;
 			children = (
 				5483BF082BFE41C3AF21FE67 /* SystemJunkScanner.swift */,
+				A10000000000000000000002 /* LargeOldFilesScanner.swift */,
+				A10000000000000000000004 /* DuplicateScanner.swift */,
+				A10000000000000000000006 /* AppUninstallerScanner.swift */,
 			);
 			path = "Services";
 			sourceTree = "<group>";
@@ -280,6 +298,12 @@
 				3D77B26381D54693A76FBCC6 /* SystemJunkScanner.swift in Sources */,
 				FA8544EE0F224EFAB42CC704 /* FDAPermissionBanner.swift in Sources */,
 				60087247A34E405687C8A358 /* FullDiskAccessOnboardingView.swift in Sources */,
+				A20000000000000000000001 /* LargeOldFilesModels.swift in Sources */,
+				A20000000000000000000002 /* LargeOldFilesScanner.swift in Sources */,
+				A20000000000000000000003 /* DuplicateModels.swift in Sources */,
+				A20000000000000000000004 /* DuplicateScanner.swift in Sources */,
+				A20000000000000000000005 /* AppUninstallerModels.swift in Sources */,
+				A20000000000000000000006 /* AppUninstallerScanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

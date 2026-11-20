@@ -1,15 +1,15 @@
 import SwiftUI
 
-enum NavigationCategory: String, CaseIterable, Identifiable {
+public enum NavigationCategory: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case cleaning = "Cleanup"
     case applications = "Applications"
     case security = "Security & Privacy"
     case system = "Optimization"
     
-    var id: String { rawValue }
+    public var id: String { rawValue }
     
-    var items: [NavigationItem] {
+    public var items: [NavigationItem] {
         switch self {
         case .overview:
             return [.smartScan]
@@ -25,7 +25,7 @@ enum NavigationCategory: String, CaseIterable, Identifiable {
     }
 }
 
-enum NavigationItem: String, CaseIterable, Identifiable, Hashable {
+public enum NavigationItem: String, CaseIterable, Identifiable, Hashable {
     case smartScan = "Smart Scan"
     case systemJunk = "System Junk"
     case largeOldFiles = "Large & Old Files"
@@ -37,9 +37,9 @@ enum NavigationItem: String, CaseIterable, Identifiable, Hashable {
     case performance = "Performance"
     case diskSpace = "Disk Space"
     
-    var id: String { rawValue }
+    public var id: String { rawValue }
     
-    var icon: String {
+    public var icon: String {
         switch self {
         case .smartScan: return "sparkles"
         case .systemJunk: return "trash.fill"
@@ -54,7 +54,7 @@ enum NavigationItem: String, CaseIterable, Identifiable, Hashable {
         }
     }
     
-    var tintColor: Color {
+    public var tintColor: Color {
         switch self {
         case .smartScan: return .cyan
         case .systemJunk: return .blue
@@ -69,7 +69,7 @@ enum NavigationItem: String, CaseIterable, Identifiable, Hashable {
         }
     }
     
-    var subtitle: String {
+    public var subtitle: String {
         switch self {
         case .smartScan: return "All-in-one smart system analysis and cleanup"
         case .systemJunk: return "Clean caches, system logs, and temporary files"
