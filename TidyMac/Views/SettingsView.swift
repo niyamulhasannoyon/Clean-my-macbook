@@ -14,14 +14,7 @@ public struct SettingsView: View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(Color.orange.opacity(0.18))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "shield.checkered")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.orange)
-                }
+                TidyMacAppIconView(size: 40, shadowRadius: 2)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("TidyMac Settings & Safety")

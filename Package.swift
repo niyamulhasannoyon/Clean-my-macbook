@@ -37,11 +37,18 @@ let package = Package(
             exclude: [
                 "Models",
                 "Services",
-                "Resources"
+                "Resources/Assets.xcassets",
+                "Resources/Info.plist",
+                "Resources/PrivacyInfo.xcprivacy",
+                "Resources/TidyMac.entitlements"
             ],
             sources: [
                 "App",
                 "Views"
+            ],
+            resources: [
+                .copy("Resources/AppIcon.icns"),
+                .copy("Resources/BrandIcon.png")
             ]
         ),
         .executableTarget(

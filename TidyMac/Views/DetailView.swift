@@ -33,9 +33,7 @@ struct DetailView: View {
                 }
             } else {
                 VStack(spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary.opacity(0.5))
+                    TidyMacAppIconView(size: 64, shadowRadius: 4)
                     Text("Select a Section from the Sidebar")
                         .font(.headline)
                         .foregroundColor(.secondary)

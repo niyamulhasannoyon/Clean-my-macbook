@@ -18,14 +18,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 14) {
             // Header
             HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
-                }
+                TidyMacAppIconView(size: 30, shadowRadius: 2)
                 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("TidyMac")

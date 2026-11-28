@@ -180,9 +180,7 @@ public struct SmartScanView: View {
                 } else {
                     switch coordinator.state {
                     case .idle:
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 46))
-                            .foregroundColor(.cyan)
+                        TidyMacAppIconView(size: 74, shadowRadius: 6)
                     case .scanning:
                         EmptyView()
                     case .completed:

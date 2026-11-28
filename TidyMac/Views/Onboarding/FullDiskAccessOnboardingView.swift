@@ -61,6 +61,9 @@ struct FullDiskAccessOnboardingView: View {
                                 .font(.system(size: 42))
                                 .foregroundColor(fdaManager.hasFullDiskAccess ? .green : .orange)
                                 .shadow(color: (fdaManager.hasFullDiskAccess ? Color.green : Color.orange).opacity(0.3), radius: 8)
+
+                            TidyMacAppIconView(size: 28, shadowRadius: 2)
+                                .offset(x: 30, y: 28)
                         }
                         
                         VStack(spacing: 6) {

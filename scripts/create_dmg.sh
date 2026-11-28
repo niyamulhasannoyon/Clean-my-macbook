@@ -87,6 +87,10 @@ if [ -f "$APP_ICON" ]; then
     cp "$APP_ICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+if [ -f "$PROJECT_DIR/TidyMac/Resources/BrandIcon.png" ]; then
+    cp "$PROJECT_DIR/TidyMac/Resources/BrandIcon.png" "$APP_BUNDLE/Contents/Resources/BrandIcon.png"
+fi
+
 if [ -f "$PROJECT_DIR/TidyMac/Resources/PrivacyInfo.xcprivacy" ]; then
     cp "$PROJECT_DIR/TidyMac/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/PrivacyInfo.xcprivacy"
 fi

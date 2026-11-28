@@ -1,7 +1,14 @@
 import Cocoa
 import CoreGraphics
 
-func createIconBitmap(size: Int) -> NSBitmapImageRep? {
+func loadSourceBrandIcon(from sourceURL: URL) -> NSImage? {
+    guard let image = NSImage(contentsOf: sourceURL) else {
+        return nil
+    }
+    return image
+}
+
+func createMacOSIconBitmap(size: Int, sourceImage: NSImage) -> NSBitmapImageRep? {
     let pixelSize = CGFloat(size)
     guard let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil,
@@ -17,155 +24,50 @@ func createIconBitmap(size: Int) -> NSBitmapImageRep? {
     ) else {
         return nil
     }
-    // Pin 1 point = 1 pixel so Retina displays do not double the output dimensions.
+    // Pin 1 point = 1 pixel so Retina displays do not double output dimensions.
     rep.size = NSSize(width: pixelSize, height: pixelSize)
-    
+
     guard let graphicsContext = NSGraphicsContext(bitmapImageRep: rep) else {
         return nil
     }
-    
+
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = graphicsContext
     defer {
         graphicsContext.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
     }
-    
+
     let ctx = graphicsContext.cgContext
     ctx.setAllowsAntialiasing(true)
     ctx.setShouldAntialias(true)
     ctx.interpolationQuality = .high
-    
-    // Scale factor relative to 1024
+
+    // Clear transparent canvas
+    ctx.clear(CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
+
+    // Standard macOS Dock / App Icon proportions (844x844 inside 1024x1024)
     let s = pixelSize / 1024.0
-    
-    // Canvas: inset slightly for standard macOS app icon shadow
-    let inset: CGFloat = 80.0 * s
-    let squircleRect = CGRect(x: inset, y: inset, width: pixelSize - 2 * inset, height: pixelSize - 2 * inset)
-    let cornerRadius: CGFloat = squircleRect.width * 0.224
-    
-    // 1. Drop Shadow under the squircle
+    let inset: CGFloat = 90.0 * s
+    let iconRect = CGRect(
+        x: inset,
+        y: inset,
+        width: pixelSize - 2.0 * inset,
+        height: pixelSize - 2.0 * inset
+    )
+
+    // Soft macOS icon drop shadow cast from the transparent-corner squircle alpha
     ctx.saveGState()
-    let shadowColor = NSColor.black.withAlphaComponent(0.35).cgColor
-    ctx.setShadow(offset: CGSize(width: 0, height: -12.0 * s), blur: 24.0 * s, color: shadowColor)
-    let squirclePath = CGPath(roundedRect: squircleRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-    ctx.addPath(squirclePath)
-    ctx.setFillColor(NSColor(red: 0.08, green: 0.12, blue: 0.24, alpha: 1.0).cgColor)
-    ctx.fillPath()
+    let shadowBlur = max(0.5, 22.0 * s)
+    let shadowOffsetY = min(-0.5, -10.0 * s)
+    ctx.setShadow(
+        offset: CGSize(width: 0, height: shadowOffsetY),
+        blur: shadowBlur,
+        color: NSColor.black.withAlphaComponent(0.32).cgColor
+    )
+    sourceImage.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
     ctx.restoreGState()
-    
-    // 2. Base Gradient Fill
-    ctx.saveGState()
-    ctx.addPath(squirclePath)
-    ctx.clip()
-    
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let gradientColors = [
-        NSColor(red: 0.06, green: 0.10, blue: 0.25, alpha: 1.0).cgColor, // Deep Midnight
-        NSColor(red: 0.09, green: 0.22, blue: 0.48, alpha: 1.0).cgColor, // Royal Slate
-        NSColor(red: 0.08, green: 0.42, blue: 0.74, alpha: 1.0).cgColor, // Ocean Blue
-        NSColor(red: 0.05, green: 0.65, blue: 0.85, alpha: 1.0).cgColor  // Cyan
-    ] as CFArray
-    let gradientLocations: [CGFloat] = [0.0, 0.4, 0.75, 1.0]
-    
-    if let gradient = CGGradient(colorsSpace: colorSpace, colors: gradientColors, locations: gradientLocations) {
-        ctx.drawLinearGradient(
-            gradient,
-            start: CGPoint(x: squircleRect.midX, y: squircleRect.maxY),
-            end: CGPoint(x: squircleRect.midX, y: squircleRect.minY),
-            options: []
-        )
-    }
-    
-    // 3. Subtle Ambient Light Radial Flare at top left
-    let flareColors = [
-        NSColor.white.withAlphaComponent(0.25).cgColor,
-        NSColor.white.withAlphaComponent(0.0).cgColor
-    ] as CFArray
-    if let flareGradient = CGGradient(colorsSpace: colorSpace, colors: flareColors, locations: [0.0, 1.0]) {
-        let flareCenter = CGPoint(x: squircleRect.minX + squircleRect.width * 0.35, y: squircleRect.maxY - squircleRect.height * 0.25)
-        ctx.drawRadialGradient(
-            flareGradient,
-            startCenter: flareCenter,
-            startRadius: 0,
-            endCenter: flareCenter,
-            endRadius: squircleRect.width * 0.7,
-            options: []
-        )
-    }
-    
-    // 4. Inner Border Highlight
-    ctx.addPath(squirclePath)
-    ctx.setLineWidth(3.0 * s)
-    ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.28).cgColor)
-    ctx.strokePath()
-    
-    ctx.restoreGState() // End squircle clipping
-    
-    // 5. Central Graphic: SF Symbol "sparkles" with subtle badge
-    ctx.saveGState()
-    
-    // Circular frosted glow behind symbol
-    let glowCenter = CGPoint(x: squircleRect.midX, y: squircleRect.midY)
-    let glowRadius: CGFloat = 220.0 * s
-    let glowColors = [
-        NSColor(red: 0.0, green: 0.9, blue: 1.0, alpha: 0.35).cgColor,
-        NSColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.0).cgColor
-    ] as CFArray
-    if let glowGradient = CGGradient(colorsSpace: colorSpace, colors: glowColors, locations: [0.0, 1.0]) {
-        ctx.drawRadialGradient(
-            glowGradient,
-            startCenter: glowCenter,
-            startRadius: 0,
-            endCenter: glowCenter,
-            endRadius: glowRadius,
-            options: []
-        )
-    }
-    
-    let whitePalette = NSImage.SymbolConfiguration(paletteColors: [.white])
-    
-    // Draw SF Symbol: "sparkles"
-    let symbolConfig = NSImage.SymbolConfiguration(pointSize: 420.0 * s, weight: .bold)
-        .applying(whitePalette)
-    if let symbolImage = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "TidyMac")?.withSymbolConfiguration(symbolConfig) {
-        
-        // Shadow for the symbol
-        ctx.setShadow(
-            offset: CGSize(width: 0, height: -10.0 * s),
-            blur: 18.0 * s,
-            color: NSColor(red: 0.0, green: 0.1, blue: 0.3, alpha: 0.55).cgColor
-        )
-        
-        let symWidth = symbolImage.size.width
-        let symHeight = symbolImage.size.height
-        let symX = squircleRect.midX - symWidth / 2.0
-        let symY = squircleRect.midY - symHeight / 2.0 - (10.0 * s)
-        let symRect = CGRect(x: symX, y: symY, width: symWidth, height: symHeight)
-        
-        symbolImage.draw(in: symRect, from: .zero, operation: .sourceOver, fraction: 1.0)
-    }
-    
-    // 6. Secondary accent SF Symbol badge: "internaldrive.fill" small icon at bottom right inside squircle
-    let badgeConfig = NSImage.SymbolConfiguration(pointSize: 130.0 * s, weight: .semibold)
-        .applying(whitePalette)
-    if let badgeImage = NSImage(systemSymbolName: "internaldrive.fill", accessibilityDescription: "Storage")?.withSymbolConfiguration(badgeConfig) {
-        let bW = badgeImage.size.width
-        let bH = badgeImage.size.height
-        let bX = squircleRect.maxX - bW - (45.0 * s)
-        let bY = squircleRect.minY + (45.0 * s)
-        let bRect = CGRect(x: bX, y: bY, width: bW, height: bH)
-        
-        // Small pill badge behind drive
-        let pillRect = bRect.insetBy(dx: -14.0 * s, dy: -14.0 * s)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.28).cgColor)
-        ctx.addPath(CGPath(roundedRect: pillRect, cornerWidth: pillRect.height / 2.0, cornerHeight: pillRect.height / 2.0, transform: nil))
-        ctx.fillPath()
-        
-        badgeImage.draw(in: bRect, from: .zero, operation: .sourceOver, fraction: 0.85)
-    }
-    
-    ctx.restoreGState()
+
     return rep
 }
 
@@ -184,7 +86,6 @@ func savePNG(rep: NSBitmapImageRep, to url: URL) -> Bool {
     }
 }
 
-// Sizes needed for macOS .iconset
 let iconSizes: [(name: String, size: Int)] = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),
@@ -205,18 +106,27 @@ let projectRoot = fileManager.fileExists(atPath: currentDir.appendingPathCompone
     ? currentDir
     : scriptProjectRoot
 
-let iconsetDir = projectRoot.appendingPathComponent("AppIcon.iconset")
 let resourcesDir = projectRoot.appendingPathComponent("TidyMac/Resources")
+let sourceBrandURL = resourcesDir.appendingPathComponent("BrandIcon.png")
+let iconsetDir = projectRoot.appendingPathComponent("AppIcon.iconset")
 let outputIcnsURL = resourcesDir.appendingPathComponent("AppIcon.icns")
 let assetIconsetDir = resourcesDir.appendingPathComponent("Assets.xcassets/AppIcon.appiconset")
 
+guard let sourceBrandImage = loadSourceBrandIcon(from: sourceBrandURL) else {
+    print("❌ Error: Missing or unreadable master icon at \(sourceBrandURL.path)")
+    exit(1)
+}
+
 try? fileManager.createDirectory(at: iconsetDir, withIntermediateDirectories: true)
 try? fileManager.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
+defer {
+    try? fileManager.removeItem(at: iconsetDir)
+}
 
-print("\n🎨 Generating TidyMac SF Symbols Original App Icon Set...")
+print("\n🎨 Generating TidyMac AppIcon Set from BrandIcon.png...")
 
 for item in iconSizes {
-    guard let rep = createIconBitmap(size: item.size) else {
+    guard let rep = createMacOSIconBitmap(size: item.size, sourceImage: sourceBrandImage) else {
         print("Failed to render bitmap for \(item.name)")
         exit(1)
     }
@@ -226,7 +136,9 @@ for item in iconSizes {
     }
     if fileManager.fileExists(atPath: assetIconsetDir.path) {
         let assetDest = assetIconsetDir.appendingPathComponent(item.name)
-        _ = savePNG(rep: rep, to: assetDest)
+        guard savePNG(rep: rep, to: assetDest) else {
+            exit(1)
+        }
     }
 }
 
