@@ -32,7 +32,11 @@ public class DuplicateScanner: ObservableObject {
     // Safety verification flag: deletion can ONLY occur if confirmed
     @Published public var isDeleteConfirmedByUser: Bool = false
     
-    public init() {}
+    private let deletionLogManager: DeletionLogManager
+    
+    public init(deletionLogManager: DeletionLogManager = .shared) {
+        self.deletionLogManager = deletionLogManager
+    }
     
     // MARK: - Computed Properties
     public var totalDuplicateFilesCount: Int {
@@ -61,6 +65,10 @@ public class DuplicateScanner: ObservableObject {
     
     public var formattedSelectedRemovalSize: String {
         ByteCountFormatter.string(fromByteCount: totalSelectedRemovalSize, countStyle: .file)
+    }
+    
+    public var hasGroupWithAllCopiesSelected: Bool {
+        duplicateGroups.contains { $0.allCopiesSelected }
     }
     
     public var filteredGroups: [DuplicateGroup] {
@@ -125,18 +133,36 @@ public class DuplicateScanner: ObservableObject {
         guard let fIdx = duplicateGroups[gIdx].files.firstIndex(where: { $0.id == fileId }) else { return }
         
         duplicateGroups[gIdx].files[fIdx].isSelectedForRemoval.toggle()
-        
-        // Update kept original indicator
-        let retained = duplicateGroups[gIdx].files.filter { !$0.isSelectedForRemoval }
+        refreshKeptOriginalFlags(in: &duplicateGroups[gIdx].files)
+        if !hasGroupWithAllCopiesSelected {
+            scanError = nil
+        }
+    }
+    
+    private nonisolated static func refreshKeptOriginalFlags(in files: inout [DuplicateFileItem]) {
+        let retained = files.filter { !$0.isSelectedForRemoval }
         if retained.count == 1, let keptId = retained.first?.id {
-            for i in duplicateGroups[gIdx].files.indices {
-                duplicateGroups[gIdx].files[i].isKeptOriginal = (duplicateGroups[gIdx].files[i].id == keptId)
+            for i in files.indices {
+                files[i].isKeptOriginal = (files[i].id == keptId)
             }
         } else {
-            for i in duplicateGroups[gIdx].files.indices {
-                duplicateGroups[gIdx].files[i].isKeptOriginal = false
+            for i in files.indices {
+                files[i].isKeptOriginal = false
             }
         }
+    }
+    
+    private func refreshKeptOriginalFlags(in files: inout [DuplicateFileItem]) {
+        Self.refreshKeptOriginalFlags(in: &files)
+    }
+    
+    public func reportAllCopiesSelectedError() {
+        let unsafeGroups = duplicateGroups.filter { $0.allCopiesSelected }
+        guard !unsafeGroups.isEmpty else { return }
+        let names = unsafeGroups.prefix(3).map { $0.fileName }.joined(separator: ", ")
+        let suffix = unsafeGroups.count > 3 ? " (+\(unsafeGroups.count - 3) more)" : ""
+        scanError = "Cannot move all copies to Trash in: \(names)\(suffix). At least one original copy in each group must remain unselected."
+        statusMessage = "Action blocked: at least one original copy per group must be preserved."
     }
     
     // MARK: - Reveal in Finder
@@ -146,12 +172,13 @@ public class DuplicateScanner: ObservableObject {
     
     // MARK: - 3-Stage Duplicate Finding Pipeline
     public func startScan(rootURL: URL? = nil) async {
-        guard !isScanning else { return }
+        guard !isScanning && !isCleaning else { return }
         isScanning = true
         progress = 0.0
         duplicateGroups = []
         lastCleanResult = nil
         showCelebration = false
+        scanError = nil
         
         let targetURL = rootURL ?? FileManager.default.homeDirectoryForCurrentUser
         let startTime = Date()
@@ -165,8 +192,7 @@ public class DuplicateScanner: ObservableObject {
             let resourceKeys: Set<URLResourceKey> = [
                 .isRegularFileKey,
                 .fileSizeKey,
-                .totalFileAllocatedSizeKey,
-                .fileAllocatedSizeKey,
+                .fileResourceIdentifierKey,
                 .isSymbolicLinkKey,
                 .isPackageKey
             ]
@@ -186,6 +212,7 @@ public class DuplicateScanner: ObservableObject {
             }
             
             var map: [Int64: [URL]] = [:]
+            var seenResourceIDsBySize: [Int64: Set<AnyHashable>] = [:]
             
             while let fileURL = enumerator.nextObject() as? URL {
                 if Task.isCancelled { break }
@@ -217,13 +244,22 @@ public class DuplicateScanner: ObservableObject {
                 if values.isSymbolicLink == true || values.isPackage == true { continue }
                 guard values.isRegularFile == true else { continue }
                 
-                let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
+                // Use exact logical byte size; APFS block rounding & compression distort allocated sizes
+                let size = Int64(values.fileSize ?? 0)
                 guard size > 100 else { continue } // Skip 0-byte and trivial files
+                
+                // Exclude hard links pointing to the same inode within a size group
+                if let resourceID = values.fileResourceIdentifier as? NSObject {
+                    let identifier = AnyHashable(resourceID)
+                    if !seenResourceIDsBySize[size, default: []].insert(identifier).inserted {
+                        continue
+                    }
+                }
                 
                 map[size, default: []].append(fileURL)
             }
             
-            // Filter: Only keep sizes with at least 2 files
+            // Filter: Only keep sizes with at least 2 distinct-inode files
             return map.filter { $0.value.count >= 2 }
         }.value
         
@@ -285,6 +321,7 @@ public class DuplicateScanner: ObservableObject {
         
         let fullGroups = await Task.detached(priority: .userInitiated) { () -> [FullKey: [URL]] in
             var map: [FullKey: [URL]] = [:]
+            var seenResourceIDsByKey: [FullKey: Set<AnyHashable>] = [:]
             
             for (partialKey, urls) in partialGroups {
                 if Task.isCancelled { break }
@@ -310,6 +347,14 @@ public class DuplicateScanner: ObservableObject {
                         let digest = hasher.finalize()
                         let fullHex = digest.map { String(format: "%02x", $0) }.joined()
                         let key = FullKey(size: partialKey.size, sha256: fullHex)
+                        
+                        if let resourceID = (try? url.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier) as? NSObject {
+                            let identifier = AnyHashable(resourceID)
+                            if !seenResourceIDsByKey[key, default: []].insert(identifier).inserted {
+                                continue
+                            }
+                        }
+                        
                         map[key, default: []].append(url)
                     }
                 }
@@ -408,71 +453,143 @@ public class DuplicateScanner: ObservableObject {
     // MARK: - Safe Delete Action (Move to macOS Trash)
     // CRITICAL: MUST NEVER delete anything without user confirmation!
     public func moveSelectedDuplicatesToTrash(userConfirmed: Bool) async {
+        await moveSelectedDuplicatesToTrash(userConfirmed: userConfirmed, trashHandler: nil)
+    }
+    
+    public func moveSelectedDuplicatesToTrash(
+        userConfirmed: Bool,
+        trashHandler: (@Sendable (URL) throws -> Void)?
+    ) async {
         guard userConfirmed else {
-            print("Action blocked: Deletion not confirmed by user.")
+            AppLogger.security.warning("Duplicate cleanup blocked: deletion not confirmed by user.")
             return
         }
-        guard !isCleaning else { return }
+        guard !isCleaning && !isScanning else { return }
+        
+        if hasGroupWithAllCopiesSelected {
+            reportAllCopiesSelectedError()
+            return
+        }
+        
         isCleaning = true
+        scanError = nil
         let isDryRun = DryRunManager.shared.isEnabled
         statusMessage = isDryRun ? "Simulating duplicate removal (Dry-Run mode)..." : "Moving confirmed duplicates to macOS Trash..."
         
         let startTime = Date()
-        var reclaimedBytes: Int64 = 0
-        var reclaimedCount: Int = 0
-        var errorsCount: Int = 0
+        let groupsSnapshot = self.duplicateGroups
+        let logManager = self.deletionLogManager
         
-        let fm = FileManager.default
-        var updatedGroups: [DuplicateGroup] = []
-        
-        for var group in duplicateGroups {
-            var remainingFiles: [DuplicateFileItem] = []
+        let outcome = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var reclaimedBytes: Int64 = 0
+            var reclaimedCount: Int = 0
+            var errorsCount: Int = 0
+            var updatedGroups: [DuplicateGroup] = []
+            var dryRunTargets: [String] = []
             
-            for file in group.files {
-                if file.isSelectedForRemoval {
-                    if let protErr = PathProtection.evaluatePath(url: file.url) {
-                        print("Skipping protected file: \(file.path) - \(protErr.localizedDescription)")
-                        errorsCount += 1
-                        remainingFiles.append(file)
-                        continue
-                    }
-                    
-                    if isDryRun {
-                        DryRunManager.shared.logSimulation(action: "Move Duplicate to Trash", target: file.path)
-                        reclaimedBytes += file.size
-                        reclaimedCount += 1
-                        // In simulation, file is considered removed from group
-                    } else {
-                        do {
-                            // Safely move to macOS Trash
-                            try fm.trashItem(at: file.url, resultingItemURL: nil)
+            for var group in groupsSnapshot {
+                // Belt-and-suspenders guard: preserve at least one copy in every group
+                let unselectedCount = group.files.filter { !$0.isSelectedForRemoval }.count
+                guard unselectedCount >= 1 else {
+                    errorsCount += 1
+                    updatedGroups.append(group)
+                    continue
+                }
+                
+                var remainingFiles: [DuplicateFileItem] = []
+                
+                for file in group.files {
+                    if file.isSelectedForRemoval {
+                        if let protErr = PathProtection.evaluatePath(url: file.url) {
+                            AppLogger.security.warning("Skipping protected file: \(file.path) - \(protErr.localizedDescription)")
+                            logManager.log(
+                                sourceModule: "Duplicates",
+                                path: file.url.path,
+                                sizeBytes: file.size,
+                                destination: .trash,
+                                isSuccess: false,
+                                errorMessage: protErr.localizedDescription
+                            )
+                            errorsCount += 1
+                            remainingFiles.append(file)
+                            continue
+                        }
+                        
+                        if isDryRun {
+                            dryRunTargets.append(file.path)
+                            logManager.log(
+                                sourceModule: "Duplicates",
+                                path: file.url.path,
+                                sizeBytes: file.size,
+                                destination: .simulated,
+                                isSuccess: true
+                            )
                             reclaimedBytes += file.size
                             reclaimedCount += 1
-                        } catch {
-                            errorsCount += 1
-                            print("Error moving duplicate to Trash: \(file.path), error: \(error.localizedDescription)")
-                            remainingFiles.append(file)
+                        } else {
+                            do {
+                                if let trashHandler = trashHandler {
+                                    try trashHandler(file.url)
+                                } else {
+                                    try fm.trashItem(at: file.url, resultingItemURL: nil)
+                                }
+                                logManager.log(
+                                    sourceModule: "Duplicates",
+                                    path: file.url.path,
+                                    sizeBytes: file.size,
+                                    destination: .trash,
+                                    isSuccess: true
+                                )
+                                reclaimedBytes += file.size
+                                reclaimedCount += 1
+                            } catch {
+                                errorsCount += 1
+                                AppLogger.cleanup.error("Error moving duplicate to Trash: \(file.path), error: \(error.localizedDescription)")
+                                logManager.log(
+                                    sourceModule: "Duplicates",
+                                    path: file.url.path,
+                                    sizeBytes: file.size,
+                                    destination: .trash,
+                                    isSuccess: false,
+                                    errorMessage: error.localizedDescription
+                                )
+                                remainingFiles.append(file)
+                            }
                         }
+                    } else {
+                        remainingFiles.append(file)
                     }
-                } else {
-                    remainingFiles.append(file)
+                }
+                
+                // Only keep group if 2 or more files remain
+                if remainingFiles.count >= 2 {
+                    Self.refreshKeptOriginalFlags(in: &remainingFiles)
+                    group.files = remainingFiles
+                    updatedGroups.append(group)
                 }
             }
             
-            // Only keep group if 2 or more files remain
-            if remainingFiles.count >= 2 {
-                group.files = remainingFiles
-                updatedGroups.append(group)
-            }
+            return (
+                updatedGroups: updatedGroups,
+                reclaimedBytes: reclaimedBytes,
+                reclaimedCount: reclaimedCount,
+                errorsCount: errorsCount,
+                dryRunTargets: dryRunTargets
+            )
+        }.value
+        
+        for target in outcome.dryRunTargets {
+            DryRunManager.shared.logSimulation(action: "Move Duplicate to Trash", target: target)
         }
         
-        self.duplicateGroups = updatedGroups
+        self.duplicateGroups = outcome.updatedGroups
         
         let elapsed = Date().timeIntervalSince(startTime)
         let result = CleanResult(
-            reclaimedBytes: reclaimedBytes,
-            reclaimedFilesCount: reclaimedCount,
-            errorsCount: errorsCount,
+            reclaimedBytes: outcome.reclaimedBytes,
+            reclaimedFilesCount: outcome.reclaimedCount,
+            errorsCount: outcome.errorsCount,
             duration: elapsed,
             cleanedCategorySizes: [:],
             isDryRun: isDryRun
@@ -482,9 +599,115 @@ public class DuplicateScanner: ObservableObject {
         self.isCleaning = false
         self.showCelebration = true
         self.statusMessage = isDryRun ?
-            "Dry-Run: Simulated \(reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
-            "Successfully moved \(reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
+            "Dry-Run: Simulated \(outcome.reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(outcome.reclaimedCount) duplicates (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file))) to Trash."
         
         StorageModel.shared.refresh()
+    }
+    
+    // MARK: - Safe Single-File Trash Action
+    public func trashSingleFile(file: DuplicateFileItem, in group: DuplicateGroup) async {
+        await trashSingleFile(file: file, in: group, trashHandler: nil)
+    }
+    
+    public func trashSingleFile(
+        file: DuplicateFileItem,
+        in group: DuplicateGroup,
+        trashHandler: (@Sendable (URL) throws -> Void)?
+    ) async {
+        guard !isCleaning && !isScanning else { return }
+        
+        guard let existingGroup = duplicateGroups.first(where: { $0.id == group.id }),
+              existingGroup.files.contains(where: { $0.id == file.id }),
+              existingGroup.files.count >= 2 else {
+            scanError = "Cannot move '\(file.name)' to Trash because at least one original copy must be preserved."
+            statusMessage = "Action blocked: Cannot remove the last remaining copy of '\(file.name)'."
+            return
+        }
+        
+        isCleaning = true
+        scanError = nil
+        let isDryRun = DryRunManager.shared.isEnabled
+        
+        if let protErr = PathProtection.evaluatePath(url: file.url) {
+            deletionLogManager.log(
+                sourceModule: "Duplicates",
+                path: file.url.path,
+                sizeBytes: file.size,
+                destination: .trash,
+                isSuccess: false,
+                errorMessage: protErr.localizedDescription
+            )
+            scanError = protErr.localizedDescription
+            statusMessage = "Cannot delete protected file: \(protErr.localizedDescription)"
+            isCleaning = false
+            return
+        }
+        
+        if isDryRun {
+            DryRunManager.shared.logSimulation(action: "Move Duplicate to Trash", target: file.path)
+            deletionLogManager.log(
+                sourceModule: "Duplicates",
+                path: file.url.path,
+                sizeBytes: file.size,
+                destination: .simulated,
+                isSuccess: true
+            )
+            removeFileFromGroup(fileId: file.id, groupId: group.id)
+            statusMessage = "[Dry-Run] Simulated moving '\(file.name)' to Trash."
+            isCleaning = false
+            return
+        }
+        
+        let fileURL = file.url
+        let trashError: Error? = await Task.detached(priority: .userInitiated) {
+            do {
+                if let trashHandler = trashHandler {
+                    try trashHandler(fileURL)
+                } else {
+                    try FileManager.default.trashItem(at: fileURL, resultingItemURL: nil)
+                }
+                return nil
+            } catch {
+                return error
+            }
+        }.value
+        
+        if let error = trashError {
+            deletionLogManager.log(
+                sourceModule: "Duplicates",
+                path: file.url.path,
+                sizeBytes: file.size,
+                destination: .trash,
+                isSuccess: false,
+                errorMessage: error.localizedDescription
+            )
+            scanError = error.localizedDescription
+            statusMessage = "Failed to move '\(file.name)' to Trash: \(error.localizedDescription)"
+            isCleaning = false
+            return
+        }
+        
+        deletionLogManager.log(
+            sourceModule: "Duplicates",
+            path: file.url.path,
+            sizeBytes: file.size,
+            destination: .trash,
+            isSuccess: true
+        )
+        removeFileFromGroup(fileId: file.id, groupId: group.id)
+        statusMessage = "Moved '\(file.name)' to Trash."
+        isCleaning = false
+        StorageModel.shared.refresh()
+    }
+    
+    private func removeFileFromGroup(fileId: UUID, groupId: UUID) {
+        guard let gIdx = duplicateGroups.firstIndex(where: { $0.id == groupId }) else { return }
+        duplicateGroups[gIdx].files.removeAll { $0.id == fileId }
+        if duplicateGroups[gIdx].files.count < 2 {
+            duplicateGroups.remove(at: gIdx)
+        } else {
+            refreshKeptOriginalFlags(in: &duplicateGroups[gIdx].files)
+        }
     }
 }

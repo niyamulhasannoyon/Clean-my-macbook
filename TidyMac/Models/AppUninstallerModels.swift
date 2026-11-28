@@ -3,7 +3,7 @@ import Foundation
 import AppKit
 
 // MARK: - Leftover Category
-public enum LeftoverCategory: String, CaseIterable, Identifiable, Hashable {
+public enum LeftoverCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
     case appBinary = "Application Bundle"
     case appSupport = "Application Support"
     case caches = "Caches"
@@ -60,7 +60,7 @@ public enum LeftoverCategory: String, CaseIterable, Identifiable, Hashable {
 }
 
 // MARK: - App Leftover Item
-public struct AppLeftoverItem: Identifiable, Hashable {
+public struct AppLeftoverItem: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let category: LeftoverCategory
     public let name: String
@@ -96,7 +96,7 @@ public struct AppLeftoverItem: Identifiable, Hashable {
 }
 
 // MARK: - Installed App Model
-public struct InstalledApp: Identifiable, Hashable {
+public struct InstalledApp: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let name: String
     public let bundleIdentifier: String
@@ -171,7 +171,7 @@ public struct InstalledApp: Identifiable, Hashable {
 }
 
 // MARK: - Orphaned App Group Model
-public struct OrphanedAppGroup: Identifiable, Hashable {
+public struct OrphanedAppGroup: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let name: String
     public let bundleIdentifier: String?
@@ -183,7 +183,7 @@ public struct OrphanedAppGroup: Identifiable, Hashable {
         name: String,
         bundleIdentifier: String? = nil,
         items: [AppLeftoverItem] = [],
-        isSelected: Bool = true
+        isSelected: Bool = false
     ) {
         self.id = id
         self.name = name

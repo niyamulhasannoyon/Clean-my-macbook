@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 enum PerformanceTab: String, CaseIterable, Identifiable {
     case liveMonitor = "Live Hardware & Apps"
@@ -71,6 +74,9 @@ struct PerformanceView: View {
             monitor.startMonitoring()
             monitor.refreshHardwareStats()
             monitor.fetchProcesses()
+        }
+        .onDisappear {
+            monitor.stopMonitoring()
         }
         .confirmationDialog(
             "Quit \(appToQuit?.name ?? "Application")?",

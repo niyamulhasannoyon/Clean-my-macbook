@@ -1,9 +1,68 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
+
+private final class SunburstLayoutCache: ObservableObject {
+    private struct CacheKey: Equatable {
+        let nodeID: UUID?
+        let nodeSize: Int64
+        let childSignatures: [ChildSignature]
+        let size: CGSize
+
+        struct ChildSignature: Equatable {
+            let id: UUID
+            let size: Int64
+            let grandchildCount: Int
+        }
+    }
+
+    private var lastKey: CacheKey?
+    private var cachedResult: (segments: [SunburstSegment], centerRect: CGRect) = ([], .zero)
+
+    func layout(for rootNode: DiskNode?, size: CGSize) -> (segments: [SunburstSegment], centerRect: CGRect) {
+        let signatures = (rootNode?.children ?? []).map {
+            CacheKey.ChildSignature(id: $0.id, size: $0.size, grandchildCount: $0.children.count)
+        }
+        let key = CacheKey(
+            nodeID: rootNode?.id,
+            nodeSize: rootNode?.size ?? 0,
+            childSignatures: signatures,
+            size: size
+        )
+
+        if key == lastKey {
+            return cachedResult
+        }
+
+        let center = CGPoint(x: size.width / 2.0, y: size.height / 2.0)
+        let maxRadius = min(size.width, size.height) / 2.0 - 15.0
+        let centerRadius: CGFloat = max(45, min(75, maxRadius * 0.32))
+
+        let result: (segments: [SunburstSegment], centerRect: CGRect)
+        if let rootNode {
+            result = SunburstLayoutEngine.layout(
+                rootNode: rootNode,
+                center: center,
+                maxRadius: maxRadius,
+                centerRadius: centerRadius,
+                ringThickness: max(32, (maxRadius - centerRadius) * 0.44),
+                gap: 3.0
+            )
+        } else {
+            result = ([], .zero)
+        }
+
+        lastKey = key
+        cachedResult = result
+        return result
+    }
+}
 
 public struct DiskSunburstCanvas: View {
     @ObservedObject var scanner: DiskSpaceScanner
+    @StateObject private var layoutCache = SunburstLayoutCache()
     
-    @State private var hoverLocation: CGPoint? = nil
     @State private var isCenterHovered: Bool = false
     
     public init(scanner: DiskSpaceScanner) {
@@ -18,15 +77,7 @@ public struct DiskSunburstCanvas: View {
             let centerRadius: CGFloat = max(45, min(75, maxRadius * 0.32))
             
             let current = scanner.currentNode ?? scanner.rootNode
-            let (segments, centerRect) = current != nil ?
-                SunburstLayoutEngine.layout(
-                    rootNode: current!,
-                    center: center,
-                    maxRadius: maxRadius,
-                    centerRadius: centerRadius,
-                    ringThickness: max(32, (maxRadius - centerRadius) * 0.44),
-                    gap: 3.0
-                ) : ([], CGRect.zero)
+            let (segments, centerRect) = layoutCache.layout(for: current, size: size)
             
             ZStack {
                 Canvas { context, canvasSize in
@@ -121,16 +172,17 @@ public struct DiskSunburstCanvas: View {
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
-                        hoverLocation = location
                         let dx = location.x - center.x
                         let dy = location.y - center.y
                         let r = hypot(dx, dy)
                         
                         if r <= centerRadius {
-                            isCenterHovered = true
-                            scanner.hoveredNode = current
+                            if !isCenterHovered { isCenterHovered = true }
+                            if scanner.hoveredNode?.id != current?.id {
+                                scanner.hoveredNode = current
+                            }
                         } else {
-                            isCenterHovered = false
+                            if isCenterHovered { isCenterHovered = false }
                             var theta = Double(atan2(dy, dx))
                             // Normalize to match segment range [-π/2 ... 3π/2]
                             if theta < -Double.pi / 2.0 {
@@ -141,15 +193,18 @@ public struct DiskSunburstCanvas: View {
                                 r >= $0.innerRadius && r <= $0.outerRadius &&
                                 theta >= $0.startAngle && theta <= $0.endAngle
                             }) {
-                                scanner.hoveredNode = hit.node
-                            } else {
+                                if scanner.hoveredNode?.id != hit.node.id {
+                                    scanner.hoveredNode = hit.node
+                                }
+                            } else if scanner.hoveredNode != nil {
                                 scanner.hoveredNode = nil
                             }
                         }
                     case .ended:
-                        hoverLocation = nil
-                        isCenterHovered = false
-                        scanner.hoveredNode = nil
+                        if isCenterHovered { isCenterHovered = false }
+                        if scanner.hoveredNode != nil {
+                            scanner.hoveredNode = nil
+                        }
                     }
                 }
                 .onTapGesture { location in
@@ -174,7 +229,7 @@ public struct DiskSunburstCanvas: View {
                             r >= $0.innerRadius && r <= $0.outerRadius &&
                             theta >= $0.startAngle && theta <= $0.endAngle
                         }) {
-                            if hit.node.isDirectory && !hit.node.children.isEmpty {
+                            if hit.node.canDrillDown {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                                     scanner.drillDown(to: hit.node)
                                 }

@@ -107,6 +107,13 @@ public enum PathProtection {
         "Library/Keychains"
     ]
     
+    /// Lowercased comparison sets/arrays for case-insensitive APFS path matching.
+    private static let normalizedCriticalSystemPaths: Set<String> = Set(criticalSystemPaths.map { $0.lowercased() })
+    private static let normalizedCriticalSystemPrefixes: [String] = criticalSystemPrefixes.map { $0.lowercased() }
+    private static let normalizedProtectedSystemAppNames: Set<String> = Set(protectedSystemAppNames.map { $0.lowercased() })
+    private static let normalizedEssentialUserDirNames: Set<String> = Set(essentialUserDirNames.map { $0.lowercased() })
+    private static let normalizedSensitiveUserPaths: Set<String> = Set(sensitiveUserPaths.map { $0.lowercased() })
+    
     /// Normalizes and standardizes a URL path, resolving any symlinks and relative path components.
     public static func standardizedPath(of url: URL) -> String {
         let standardURL = url.standardizedFileURL.resolvingSymlinksInPath()
@@ -117,61 +124,63 @@ public enum PathProtection {
     /// Returns `nil` if safe, or a `PathProtectionError` describing why the path is protected.
     public static func evaluatePath(url: URL, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> PathProtectionError? {
         let path = standardizedPath(of: url)
+        let normalizedPath = path.lowercased()
         
         // 1. Empty or Root
-        if path.isEmpty {
+        if normalizedPath.isEmpty {
             return .invalidPath(path)
         }
-        if path == "/" {
+        if normalizedPath == "/" {
             return .rootDirectory(path)
         }
         
         // 2. Critical System Paths (Exact match)
-        if criticalSystemPaths.contains(path) {
+        if normalizedCriticalSystemPaths.contains(normalizedPath) {
             return .criticalSystemDirectory(path)
         }
         
         // 3. Critical System Prefixes
-        for prefix in criticalSystemPrefixes {
-            if path.hasPrefix(prefix) {
+        for prefix in normalizedCriticalSystemPrefixes {
+            if normalizedPath.hasPrefix(prefix) {
                 return .criticalSystemDirectory(path)
             }
         }
         
         // 4. Apple System Applications
-        if path.hasPrefix("/System/Applications") {
+        if normalizedPath == "/system/applications" || normalizedPath.hasPrefix("/system/applications/") {
             return .systemApplication(path)
         }
-        for appName in protectedSystemAppNames {
-            if path == "/Applications/\(appName)" || path.hasPrefix("/Applications/\(appName)/") {
+        for appName in normalizedProtectedSystemAppNames {
+            let appPath = "/applications/\(appName)"
+            if normalizedPath == appPath || normalizedPath.hasPrefix(appPath + "/") {
                 return .systemApplication(path)
             }
         }
         
         // 5. User Home Directory checks
-        let homePath = standardizedPath(of: homeDirectory)
-        if path == homePath {
+        let normalizedHomePath = standardizedPath(of: homeDirectory).lowercased()
+        if normalizedPath == normalizedHomePath {
             return .userHomeDirectory(path)
         }
         
         // 6. Essential User Directories (the top-level folder itself, e.g. ~/Desktop)
-        for dirName in essentialUserDirNames {
-            let essentialDir = (homePath as NSString).appendingPathComponent(dirName)
-            if path == essentialDir {
+        for dirName in normalizedEssentialUserDirNames {
+            let essentialDir = (normalizedHomePath as NSString).appendingPathComponent(dirName)
+            if normalizedPath == essentialDir {
                 return .essentialUserDirectory(path)
             }
         }
         
         // 7. Sensitive Credential & Config Paths
-        for sensitive in sensitiveUserPaths {
-            let fullSensitive = (homePath as NSString).appendingPathComponent(sensitive)
-            if path == fullSensitive || path.hasPrefix(fullSensitive + "/") {
+        for sensitive in normalizedSensitiveUserPaths {
+            let fullSensitive = (normalizedHomePath as NSString).appendingPathComponent(sensitive)
+            if normalizedPath == fullSensitive || normalizedPath.hasPrefix(fullSensitive + "/") {
                 return .securityOrCredentialData(path)
             }
         }
         
         // 8. Keychains anywhere in Library
-        if path.contains("/Library/Keychains") || path.hasSuffix(".keychain") || path.hasSuffix(".keychain-db") {
+        if normalizedPath.contains("/library/keychains") || normalizedPath.hasSuffix(".keychain") || normalizedPath.hasSuffix(".keychain-db") {
             return .securityOrCredentialData(path)
         }
         

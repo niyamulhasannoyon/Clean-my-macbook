@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 struct ContentView: View {
     @State private var selectedItem: NavigationItem? = .smartScan
@@ -94,10 +97,11 @@ struct ContentView: View {
         }
         .onAppear {
             // Check FDA status on app launch; if missing, show onboarding guide
-            fdaManager.checkAccess()
-            if !fdaManager.hasFullDiskAccess && !hasSeenFDAOnboarding {
-                fdaManager.isShowingOnboardingSheet = true
-                hasSeenFDAOnboarding = true
+            fdaManager.checkAccess { granted in
+                if !granted && !hasSeenFDAOnboarding {
+                    fdaManager.isShowingOnboardingSheet = true
+                    hasSeenFDAOnboarding = true
+                }
             }
         }
         .frame(minWidth: 800, minHeight: 560)

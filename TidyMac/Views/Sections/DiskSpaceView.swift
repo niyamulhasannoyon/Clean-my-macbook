@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct DiskSpaceView: View {
     @StateObject private var scanner = DiskSpaceScanner.shared
@@ -259,7 +262,7 @@ public struct DiskSpaceView: View {
     // MARK: - Main Chart Container
     private var chartContainerView: some View {
         ZStack {
-            if scanner.isScanning {
+            if scanner.isScanning || scanner.isDeepScanning {
                 VStack(spacing: 12) {
                     ProgressView()
                         .scaleEffect(1.2)
@@ -304,7 +307,14 @@ public struct DiskSpaceView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.primary)
                         
-                        if node.isDirectory {
+                        if node.isVirtual {
+                            Text("Group")
+                                .font(.system(size: 9, weight: .medium))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.15))
+                                .cornerRadius(3)
+                        } else if node.isDirectory {
                             Text("Folder")
                                 .font(.system(size: 9, weight: .medium))
                                 .padding(.horizontal, 4)
@@ -336,7 +346,7 @@ public struct DiskSpaceView: View {
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
                     
-                    if node.isDirectory && !node.children.isEmpty {
+                    if node.canDrillDown {
                         Button(action: {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                                 scanner.drillDown(to: node)
@@ -483,7 +493,7 @@ private struct DiskItemRow: View {
             
             // Action Buttons
             HStack(spacing: 4) {
-                if item.isDirectory && !item.children.isEmpty {
+                if item.canDrillDown {
                     Button(action: onDrillDown) {
                         Image(systemName: "chevron.right.circle.fill")
                             .font(.system(size: 16))
@@ -499,7 +509,9 @@ private struct DiskItemRow: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Reveal in Finder")
+                .disabled(item.isVirtual)
+                .opacity(item.isVirtual ? 0.35 : 1.0)
+                .help(item.isVirtual ? "Virtual group cannot be revealed in Finder" : "Reveal in Finder")
                 
                 Button(action: onOpen) {
                     Image(systemName: "arrow.up.forward.square")
@@ -507,7 +519,9 @@ private struct DiskItemRow: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Open File/App")
+                .disabled(item.isVirtual)
+                .opacity(item.isVirtual ? 0.35 : 1.0)
+                .help(item.isVirtual ? "Virtual group cannot be opened directly" : "Open File/App")
             }
         }
         .padding(.horizontal, 12)

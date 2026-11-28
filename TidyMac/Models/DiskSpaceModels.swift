@@ -28,7 +28,13 @@ public final class DiskNode: Identifiable, ObservableObject, @unchecked Sendable
     public var children: [DiskNode]
     public var color: Color
     public var level: Int
+    public let isVirtual: Bool
+    public var hasScannedChildren: Bool
     public weak var parent: DiskNode?
+    
+    public var canDrillDown: Bool {
+        isDirectory && (!children.isEmpty || !hasScannedChildren)
+    }
     
     public init(
         id: UUID = UUID(),
@@ -41,6 +47,8 @@ public final class DiskNode: Identifiable, ObservableObject, @unchecked Sendable
         children: [DiskNode] = [],
         color: Color = .blue,
         level: Int = 0,
+        isVirtual: Bool = false,
+        hasScannedChildren: Bool = true,
         parent: DiskNode? = nil
     ) {
         self.id = id
@@ -53,6 +61,8 @@ public final class DiskNode: Identifiable, ObservableObject, @unchecked Sendable
         self.children = children
         self.color = color
         self.level = level
+        self.isVirtual = isVirtual
+        self.hasScannedChildren = hasScannedChildren
         self.parent = parent
     }
     

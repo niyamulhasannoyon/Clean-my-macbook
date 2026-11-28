@@ -22,7 +22,11 @@ public class LargeOldFilesScanner: ObservableObject {
     @Published public var sortOption: LargeOldSortOption = .sizeDescending
     @Published public var searchKeyword: String = ""
     
-    public init() {}
+    private let deletionLogManager: DeletionLogManager
+    
+    public init(deletionLogManager: DeletionLogManager = .shared) {
+        self.deletionLogManager = deletionLogManager
+    }
     
     // Computed statistics
     public var totalSize: Int64 {
@@ -239,7 +243,19 @@ public class LargeOldFilesScanner: ObservableObject {
     
     // MARK: - Actions: Move to Trash (Single)
     public func moveToTrash(item: LargeOldFileItem) {
+        moveToTrash(item: item, trashHandler: nil)
+    }
+    
+    public func moveToTrash(item: LargeOldFileItem, trashHandler: ((URL) throws -> Void)?) {
         if let protErr = PathProtection.evaluatePath(url: item.url) {
+            deletionLogManager.log(
+                sourceModule: "Large & Old Files",
+                path: item.url.path,
+                sizeBytes: item.size,
+                destination: .trash,
+                isSuccess: false,
+                errorMessage: protErr.localizedDescription
+            )
             statusMessage = "Cannot delete protected file: \(protErr.localizedDescription)"
             scanError = protErr.localizedDescription
             return
@@ -247,6 +263,13 @@ public class LargeOldFilesScanner: ObservableObject {
         
         if DryRunManager.shared.isEnabled {
             DryRunManager.shared.logSimulation(action: "Move to Trash", target: item.path)
+            deletionLogManager.log(
+                sourceModule: "Large & Old Files",
+                path: item.url.path,
+                sizeBytes: item.size,
+                destination: .simulated,
+                isSuccess: true
+            )
             files.removeAll { $0.id == item.id }
             statusMessage = "[Dry-Run] Simulated moving '\(item.name)' to Trash."
             return
@@ -254,11 +277,30 @@ public class LargeOldFilesScanner: ObservableObject {
         
         let fm = FileManager.default
         do {
-            try fm.trashItem(at: item.url, resultingItemURL: nil)
+            if let trashHandler = trashHandler {
+                try trashHandler(item.url)
+            } else {
+                try fm.trashItem(at: item.url, resultingItemURL: nil)
+            }
+            deletionLogManager.log(
+                sourceModule: "Large & Old Files",
+                path: item.url.path,
+                sizeBytes: item.size,
+                destination: .trash,
+                isSuccess: true
+            )
             files.removeAll { $0.id == item.id }
             statusMessage = "Moved '\(item.name)' to Trash."
             StorageModel.shared.refresh()
         } catch {
+            deletionLogManager.log(
+                sourceModule: "Large & Old Files",
+                path: item.url.path,
+                sizeBytes: item.size,
+                destination: .trash,
+                isSuccess: false,
+                errorMessage: error.localizedDescription
+            )
             statusMessage = "Failed to move '\(item.name)' to Trash: \(error.localizedDescription)"
             scanError = error.localizedDescription
         }
@@ -266,49 +308,106 @@ public class LargeOldFilesScanner: ObservableObject {
     
     // MARK: - Actions: Move Selected to Trash
     public func moveSelectedToTrash() async {
-        guard !isCleaning else { return }
+        await moveSelectedToTrash(trashHandler: nil)
+    }
+    
+    public func moveSelectedToTrash(trashHandler: (@Sendable (URL) throws -> Void)?) async {
+        guard !isCleaning && !isScanning else { return }
         isCleaning = true
         let isDryRun = DryRunManager.shared.isEnabled
         statusMessage = isDryRun ? "Simulating file cleanup (Dry-Run mode)..." : "Moving selected files to macOS Trash..."
         
         let startTime = Date()
-        var reclaimedBytes: Int64 = 0
-        var reclaimedCount: Int = 0
-        var errorsCount: Int = 0
-        
         let itemsToTrash = selectedFiles
-        let fm = FileManager.default
+        let logManager = self.deletionLogManager
         
-        for item in itemsToTrash {
-            if let protErr = PathProtection.evaluatePath(url: item.url) {
-                print("Skipping protected file: \(item.path) - \(protErr.localizedDescription)")
-                errorsCount += 1
-                continue
-            }
+        let outcome = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var reclaimedBytes: Int64 = 0
+            var reclaimedCount: Int = 0
+            var errorsCount: Int = 0
+            var removedIDs = Set<UUID>()
+            var dryRunTargets: [String] = []
             
-            if isDryRun {
-                DryRunManager.shared.logSimulation(action: "Move to Trash", target: item.path)
-                reclaimedBytes += item.size
-                reclaimedCount += 1
-                files.removeAll { $0.id == item.id }
-            } else {
-                do {
-                    try fm.trashItem(at: item.url, resultingItemURL: nil)
+            for item in itemsToTrash {
+                if let protErr = PathProtection.evaluatePath(url: item.url) {
+                    AppLogger.security.warning("Skipping protected file: \(item.path) - \(protErr.localizedDescription)")
+                    logManager.log(
+                        sourceModule: "Large & Old Files",
+                        path: item.url.path,
+                        sizeBytes: item.size,
+                        destination: .trash,
+                        isSuccess: false,
+                        errorMessage: protErr.localizedDescription
+                    )
+                    errorsCount += 1
+                    continue
+                }
+                
+                if isDryRun {
+                    dryRunTargets.append(item.path)
+                    logManager.log(
+                        sourceModule: "Large & Old Files",
+                        path: item.url.path,
+                        sizeBytes: item.size,
+                        destination: .simulated,
+                        isSuccess: true
+                    )
                     reclaimedBytes += item.size
                     reclaimedCount += 1
-                    files.removeAll { $0.id == item.id }
-                } catch {
-                    errorsCount += 1
-                    print("Error trashing \(item.path): \(error.localizedDescription)")
+                    removedIDs.insert(item.id)
+                } else {
+                    do {
+                        if let trashHandler = trashHandler {
+                            try trashHandler(item.url)
+                        } else {
+                            try fm.trashItem(at: item.url, resultingItemURL: nil)
+                        }
+                        logManager.log(
+                            sourceModule: "Large & Old Files",
+                            path: item.url.path,
+                            sizeBytes: item.size,
+                            destination: .trash,
+                            isSuccess: true
+                        )
+                        reclaimedBytes += item.size
+                        reclaimedCount += 1
+                        removedIDs.insert(item.id)
+                    } catch {
+                        errorsCount += 1
+                        AppLogger.cleanup.error("Error trashing \(item.path): \(error.localizedDescription)")
+                        logManager.log(
+                            sourceModule: "Large & Old Files",
+                            path: item.url.path,
+                            sizeBytes: item.size,
+                            destination: .trash,
+                            isSuccess: false,
+                            errorMessage: error.localizedDescription
+                        )
+                    }
                 }
             }
+            
+            return (
+                reclaimedBytes: reclaimedBytes,
+                reclaimedCount: reclaimedCount,
+                errorsCount: errorsCount,
+                removedIDs: removedIDs,
+                dryRunTargets: dryRunTargets
+            )
+        }.value
+        
+        for target in outcome.dryRunTargets {
+            DryRunManager.shared.logSimulation(action: "Move to Trash", target: target)
         }
+        
+        files.removeAll { outcome.removedIDs.contains($0.id) }
         
         let elapsed = Date().timeIntervalSince(startTime)
         let result = CleanResult(
-            reclaimedBytes: reclaimedBytes,
-            reclaimedFilesCount: reclaimedCount,
-            errorsCount: errorsCount,
+            reclaimedBytes: outcome.reclaimedBytes,
+            reclaimedFilesCount: outcome.reclaimedCount,
+            errorsCount: outcome.errorsCount,
             duration: elapsed,
             cleanedCategorySizes: [:],
             isDryRun: isDryRun
@@ -318,8 +417,8 @@ public class LargeOldFilesScanner: ObservableObject {
         self.isCleaning = false
         self.showCelebration = true
         self.statusMessage = isDryRun ?
-            "Dry-Run: Simulated \(reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
-            "Successfully moved \(reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
+            "Dry-Run: Simulated \(outcome.reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(outcome.reclaimedCount) files (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file))) to Trash."
         
         StorageModel.shared.refresh()
     }

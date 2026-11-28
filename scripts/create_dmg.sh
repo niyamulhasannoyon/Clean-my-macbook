@@ -22,6 +22,7 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_OUTPUT="$BUILD_DIR/$APP_NAME.dmg"
 STAGING_DIR="$BUILD_DIR/dmg_staging"
 ENTITLEMENTS="$PROJECT_DIR/TidyMac/Resources/TidyMac.entitlements"
+APP_ICON="$PROJECT_DIR/TidyMac/Resources/AppIcon.icns"
 
 SIGNING_IDENTITY="${DEVELOPER_ID_APPLICATION:-${SIGNING_IDENTITY:-"-"}}"
 
@@ -62,7 +63,7 @@ lipo -info "$UNIVERSAL_BIN"
 # ------------------------------------------------------------------------------
 # Step 2: Ensure App Icon Exists
 # ------------------------------------------------------------------------------
-if [ ! -f "$PROJECT_DIR/AppIcon.icns" ]; then
+if [ ! -f "$APP_ICON" ]; then
     echo "🎨 Generating AppIcon.icns..."
     swift "$PROJECT_DIR/scripts/generate_app_icon.swift"
 fi
@@ -82,8 +83,8 @@ if [ -f "$PROJECT_DIR/TidyMac/Resources/Info.plist" ]; then
     cp "$PROJECT_DIR/TidyMac/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 fi
 
-if [ -f "$PROJECT_DIR/AppIcon.icns" ]; then
-    cp "$PROJECT_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+if [ -f "$APP_ICON" ]; then
+    cp "$APP_ICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
 if [ -f "$PROJECT_DIR/TidyMac/Resources/PrivacyInfo.xcprivacy" ]; then
@@ -118,10 +119,9 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
-ln -s /Applications "$STAGING_DIR/Applications"
 
-if [ -f "$PROJECT_DIR/AppIcon.icns" ]; then
-    cp "$PROJECT_DIR/AppIcon.icns" "$STAGING_DIR/.VolumeIcon.icns"
+if [ -f "$APP_ICON" ]; then
+    cp "$APP_ICON" "$STAGING_DIR/.VolumeIcon.icns"
     if command -v SetFile &>/dev/null; then
         SetFile -a C "$STAGING_DIR" 2>/dev/null || true
     fi
@@ -134,9 +134,13 @@ rm -f "$DMG_OUTPUT"
 
 if command -v create-dmg &>/dev/null; then
     echo "📀 Step 5: Building styled DMG with 'create-dmg'..."
+    VOLICON_ARGS=()
+    if [ -f "$APP_ICON" ]; then
+        VOLICON_ARGS=(--volicon "$APP_ICON")
+    fi
     create-dmg \
         --volname "$APP_NAME" \
-        --volicon "$PROJECT_DIR/AppIcon.icns" \
+        "${VOLICON_ARGS[@]}" \
         --window-pos 200 120 \
         --window-size 600 400 \
         --icon-size 100 \
@@ -146,10 +150,13 @@ if command -v create-dmg &>/dev/null; then
         "$DMG_OUTPUT" \
         "$STAGING_DIR" || {
             echo "⚠️  create-dmg encountered an issue, falling back to hdiutil..."
+            rm -f "$DMG_OUTPUT"
+            ln -sfn /Applications "$STAGING_DIR/Applications"
             hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_OUTPUT"
         }
 else
     echo "📀 Step 5: Building compressed DMG using native macOS 'hdiutil'..."
+    ln -sfn /Applications "$STAGING_DIR/Applications"
     hdiutil create \
         -volname "$APP_NAME" \
         -srcfolder "$STAGING_DIR" \

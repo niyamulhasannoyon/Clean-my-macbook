@@ -15,30 +15,77 @@ public final class PerformanceMonitor: ObservableObject {
     @Published public var statusMessage: String? = nil
     
     private var timer: Timer?
+    private var isMonitoringRequested: Bool = false
+    private let monitoringLock = NSLock()
+    private var fetchGeneration: UInt64 = 0
     private var previousCPUTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)? = nil
+    
+    public var isMonitoring: Bool {
+        timer != nil
+    }
     
     private init() {
         refreshHardwareStats()
         fetchProcesses()
         fetchLaunchItems()
-        startMonitoring()
     }
     
     deinit {
-        stopMonitoring()
+        monitoringLock.lock()
+        isMonitoringRequested = false
+        monitoringLock.unlock()
+        let activeTimer = timer
+        timer = nil
+        if let activeTimer {
+            if Thread.isMainThread {
+                activeTimer.invalidate()
+            } else {
+                DispatchQueue.main.async {
+                    activeTimer.invalidate()
+                }
+            }
+        }
     }
     
     public func startMonitoring() {
-        guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            self?.refreshHardwareStats()
-            self?.fetchProcesses()
+        monitoringLock.lock()
+        isMonitoringRequested = true
+        monitoringLock.unlock()
+        
+        let startOnMain = { [weak self] in
+            guard let self = self else { return }
+            self.monitoringLock.lock()
+            let shouldStart = self.isMonitoringRequested
+            self.monitoringLock.unlock()
+            guard shouldStart, self.timer == nil else { return }
+            self.timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                self?.refreshHardwareStats()
+                self?.fetchProcesses()
+            }
+        }
+        
+        if Thread.isMainThread {
+            startOnMain()
+        } else {
+            DispatchQueue.main.async(execute: startOnMain)
         }
     }
     
     public func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+        monitoringLock.lock()
+        isMonitoringRequested = false
+        monitoringLock.unlock()
+        
+        let stopOnMain = { [weak self] in
+            self?.timer?.invalidate()
+            self?.timer = nil
+        }
+        
+        if Thread.isMainThread {
+            stopOnMain()
+        } else {
+            DispatchQueue.main.async(execute: stopOnMain)
+        }
     }
     
     // MARK: - Hardware Metrics Refresh
@@ -72,21 +119,33 @@ public final class PerformanceMonitor: ObservableObject {
         let used = wired + active + compressed
         let totalFree = free + inactive
         
-        DispatchQueue.main.async {
-            self.memory = MemoryMetrics(
-                totalBytes: total,
-                usedBytes: min(used, total),
-                freeBytes: totalFree,
-                wiredBytes: wired,
-                activeBytes: active,
-                inactiveBytes: inactive,
-                compressedBytes: compressed
-            )
+        let metrics = MemoryMetrics(
+            totalBytes: total,
+            usedBytes: min(used, total),
+            freeBytes: totalFree,
+            wiredBytes: wired,
+            activeBytes: active,
+            inactiveBytes: inactive,
+            compressedBytes: compressed
+        )
+        if Thread.isMainThread {
+            self.memory = metrics
+        } else {
+            DispatchQueue.main.async {
+                self.memory = metrics
+            }
         }
     }
     
     // MARK: - CPU Statistics (host_cpu_load_info)
     private func updateCPU() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateCPU()
+            }
+            return
+        }
+        
         var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
         var cpuLoad = host_cpu_load_info()
         
@@ -116,15 +175,13 @@ public final class PerformanceMonitor: ObservableObject {
                 let idlePct = idleDelta / totalDelta
                 let totalUsage = userPct + sysPct
                 
-                DispatchQueue.main.async {
-                    self.cpu = CPUMetrics(
-                        usageRatio: min(1.0, max(0.0, totalUsage)),
-                        coreCount: ProcessInfo.processInfo.activeProcessorCount,
-                        userPercent: userPct * 100,
-                        systemPercent: sysPct * 100,
-                        idlePercent: idlePct * 100
-                    )
-                }
+                self.cpu = CPUMetrics(
+                    usageRatio: min(1.0, max(0.0, totalUsage)),
+                    coreCount: ProcessInfo.processInfo.activeProcessorCount,
+                    userPercent: userPct * 100,
+                    systemPercent: sysPct * 100,
+                    idlePercent: idlePct * 100
+                )
             }
         }
         
@@ -138,52 +195,81 @@ public final class PerformanceMonitor: ObservableObject {
             let total = Int64(values.volumeTotalCapacity ?? 0)
             let available = values.volumeAvailableCapacityForImportantUsage ?? 0
             let used = max(0, total - available)
+            let metrics = DiskMetrics(
+                totalBytes: total,
+                freeBytes: available,
+                usedBytes: used
+            )
             
-            DispatchQueue.main.async {
-                self.disk = DiskMetrics(
-                    totalBytes: total,
-                    freeBytes: available,
-                    usedBytes: used
-                )
+            if Thread.isMainThread {
+                self.disk = metrics
+            } else {
+                DispatchQueue.main.async {
+                    self.disk = metrics
+                }
             }
         }
     }
     
     // MARK: - Top Memory-Hungry Apps (proc_pidinfo)
+    private struct RunningAppSnapshot {
+        let pid: pid_t
+        let name: String
+        let bundleIdentifier: String
+        let icon: NSImage
+    }
+    
+    @MainActor
+    private static func captureRunningAppSnapshots() -> [RunningAppSnapshot] {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let defaultIcon = NSWorkspace.shared.icon(for: .application)
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard app.activationPolicy == .regular && app.processIdentifier != myPid else {
+                return nil
+            }
+            return RunningAppSnapshot(
+                pid: app.processIdentifier,
+                name: app.localizedName ?? "App",
+                bundleIdentifier: app.bundleIdentifier ?? "",
+                icon: app.icon ?? defaultIcon
+            )
+        }
+    }
+    
     public func fetchProcesses() {
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let myPid = ProcessInfo.processInfo.processIdentifier
-            let apps = NSWorkspace.shared.runningApplications.filter { app in
-                app.activationPolicy == .regular && app.processIdentifier != myPid
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            let snapshots = Self.captureRunningAppSnapshots()
+            let pids = snapshots.map { $0.pid }
+            
+            let memoryByPid: [pid_t: UInt64] = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInteractive).async {
+                    var result: [pid_t: UInt64] = [:]
+                    result.reserveCapacity(pids.count)
+                    
+                    for pid in pids {
+                        var taskInfo = proc_taskinfo()
+                        let size = MemoryLayout<proc_taskinfo>.stride
+                        let ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(size))
+                        result[pid] = (ret == size) ? taskInfo.pti_resident_size : 0
+                    }
+                    
+                    continuation.resume(returning: result)
+                }
             }
             
-            var items: [ProcessItem] = []
-            
-            for app in apps {
-                let pid = app.processIdentifier
-                var taskInfo = proc_taskinfo()
-                let size = MemoryLayout<proc_taskinfo>.stride
-                let ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(size))
-                
-                let rss = (ret == size) ? taskInfo.pti_resident_size : 0
-                let name = app.localizedName ?? "App"
-                let bundleId = app.bundleIdentifier ?? ""
-                let icon = app.icon ?? NSWorkspace.shared.icon(for: .application)
-                
-                items.append(ProcessItem(
-                    pid: pid,
-                    name: name,
-                    bundleIdentifier: bundleId,
-                    memoryBytes: rss,
-                    icon: icon
-                ))
+            var items = snapshots.map { app in
+                ProcessItem(
+                    pid: app.pid,
+                    name: app.name,
+                    bundleIdentifier: app.bundleIdentifier,
+                    memoryBytes: memoryByPid[app.pid] ?? 0,
+                    icon: app.icon
+                )
             }
             
             items.sort { $0.memoryBytes > $1.memoryBytes }
-            
-            DispatchQueue.main.async {
-                self?.topProcesses = items
-            }
+            self.topProcesses = items
         }
     }
     
@@ -205,13 +291,84 @@ public final class PerformanceMonitor: ObservableObject {
     }
     
     // MARK: - Startup & Launch Agents Manager
-    public func fetchLaunchItems() {
-        isLoadingLaunchItems = true
+    public static func scanLaunchItems(
+        in scanLocations: [(location: LaunchItemLocation, url: URL)],
+        fileManager: FileManager = .default
+    ) -> [LaunchItem] {
+        var items: [LaunchItem] = []
         
+        for entry in scanLocations {
+            guard let files = try? fileManager.contentsOfDirectory(at: entry.url, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            
+            for file in files {
+                let filename = file.lastPathComponent
+                guard filename.hasSuffix(".plist") || filename.hasSuffix(".plist.disabled") else {
+                    continue
+                }
+                
+                let isDisabledByExtension = filename.hasSuffix(".disabled")
+                var isEnabled = !isDisabledByExtension
+                var label = filename.replacingOccurrences(of: ".plist.disabled", with: "").replacingOccurrences(of: ".plist", with: "")
+                var program = ""
+                
+                if let data = try? Data(contentsOf: file),
+                   let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+                    if let plistLabel = plist["Label"] as? String {
+                        label = plistLabel
+                    }
+                    if let disabledVal = plist["Disabled"] as? Bool, disabledVal == true {
+                        isEnabled = false
+                    }
+                    if let prog = plist["Program"] as? String {
+                        program = prog
+                    } else if let args = plist["ProgramArguments"] as? [String], let first = args.first {
+                        program = first
+                    }
+                }
+                
+                let displayName = Self.formatDisplayName(from: label)
+                
+                items.append(LaunchItem(
+                    id: file.path,
+                    label: label,
+                    displayName: displayName,
+                    path: file.path,
+                    location: entry.location,
+                    program: program.isEmpty ? file.path : program,
+                    isEnabled: isEnabled
+                ))
+            }
+        }
+        
+        items.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        return items
+    }
+    
+    public func fetchLaunchItems() {
+        let beginOnMain: () -> UInt64 = { [weak self] in
+            guard let self = self else { return 0 }
+            self.fetchGeneration &+= 1
+            self.isLoadingLaunchItems = true
+            return self.fetchGeneration
+        }
+        
+        if Thread.isMainThread {
+            let generation = beginOnMain()
+            dispatchLaunchItemScan(generation: generation)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let generation = beginOnMain()
+                self.dispatchLaunchItemScan(generation: generation)
+            }
+        }
+    }
+    
+    private func dispatchLaunchItemScan(generation: UInt64) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            var items: [LaunchItem] = []
-            
             let home = FileManager.default.homeDirectoryForCurrentUser
             let scanLocations: [(location: LaunchItemLocation, url: URL)] = [
                 (.userAgent, home.appendingPathComponent("Library/LaunchAgents")),
@@ -219,68 +376,23 @@ public final class PerformanceMonitor: ObservableObject {
                 (.systemDaemon, URL(fileURLWithPath: "/Library/LaunchDaemons"))
             ]
             
-            for entry in scanLocations {
-                guard let files = try? FileManager.default.contentsOfDirectory(at: entry.url, includingPropertiesForKeys: nil) else {
-                    continue
-                }
-                
-                for file in files {
-                    let filename = file.lastPathComponent
-                    guard filename.hasSuffix(".plist") || filename.hasSuffix(".plist.disabled") else {
-                        continue
-                    }
-                    
-                    let isDisabledByExtension = filename.hasSuffix(".disabled")
-                    var isEnabled = !isDisabledByExtension
-                    var label = filename.replacingOccurrences(of: ".plist.disabled", with: "").replacingOccurrences(of: ".plist", with: "")
-                    var program = ""
-                    
-                    if let data = try? Data(contentsOf: file),
-                       let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-                        if let plistLabel = plist["Label"] as? String {
-                            label = plistLabel
-                        }
-                        if let disabledVal = plist["Disabled"] as? Bool, disabledVal == true {
-                            isEnabled = false
-                        }
-                        if let prog = plist["Program"] as? String {
-                            program = prog
-                        } else if let args = plist["ProgramArguments"] as? [String], let first = args.first {
-                            program = first
-                        }
-                    }
-                    
-                    let displayName = self.formatDisplayName(from: label)
-                    
-                    items.append(LaunchItem(
-                        id: file.path,
-                        label: label,
-                        displayName: displayName,
-                        path: file.path,
-                        location: entry.location,
-                        program: program.isEmpty ? file.path : program,
-                        isEnabled: isEnabled
-                    ))
-                }
-            }
-            
-            items.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            let items = Self.scanLaunchItems(in: scanLocations)
             
             DispatchQueue.main.async {
+                guard self.fetchGeneration == generation else { return }
                 self.launchItems = items
                 self.isLoadingLaunchItems = false
             }
         }
     }
     
-    private func formatDisplayName(from label: String) -> String {
+    public static func formatDisplayName(from label: String) -> String {
         let parts = label.split(separator: ".")
         if let last = parts.last {
             let cleaned = String(last)
-                .replacingOccurrences(of: "com", with: "")
-                .replacingOccurrences(of: "org", with: "")
                 .replacingOccurrences(of: "-", with: " ")
                 .replacingOccurrences(of: "_", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
                 .capitalized
             if !cleaned.isEmpty {
                 return cleaned
@@ -302,72 +414,131 @@ public final class PerformanceMonitor: ObservableObject {
         return SecurityEscaping.appleScriptStringEscape(string)
     }
     
+    public static func buildSystemLaunchItemToggleCommand(
+        path: String,
+        enable: Bool
+    ) -> (shellCommand: String, targetPath: String, didRename: Bool) {
+        let quotedPath = posixShellQuote(path)
+        if enable {
+            if path.hasSuffix(".disabled") {
+                let target = String(path.dropLast(".disabled".count))
+                let quotedTarget = posixShellQuote(target)
+                let command = "mv -f \(quotedPath) \(quotedTarget) && /bin/launchctl load \(quotedTarget)"
+                return (command, target, true)
+            } else {
+                let command = "/bin/launchctl load \(quotedPath)"
+                return (command, path, false)
+            }
+        } else {
+            if path.hasSuffix(".disabled") {
+                let command = "/bin/launchctl unload \(quotedPath) || true"
+                return (command, path, false)
+            } else {
+                let target = path + ".disabled"
+                let quotedTarget = posixShellQuote(target)
+                let command = "/bin/launchctl unload \(quotedPath) || true; mv -f \(quotedPath) \(quotedTarget)"
+                return (command, target, true)
+            }
+        }
+    }
+    
     // MARK: - Toggle Launch Item Enable / Disable
     public func toggleLaunchItem(item: LaunchItem, enable: Bool) {
-        guard let index = launchItems.firstIndex(where: { $0.id == item.id }) else { return }
-        launchItems[index].isToggling = true
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.toggleLaunchItem(item: item, enable: enable)
+            }
+            return
+        }
         
+        guard let index = launchItems.firstIndex(where: { $0.id == item.id }) else { return }
         let path = item.path
+        
+        if !PerformanceMonitor.isValidLaunchItemPath(path) {
+            AppLogger.security.error("Blocked launch item toggle for unsafe path: \(path)")
+            launchItems[index].isToggling = false
+            fetchLaunchItems()
+            return
+        }
+        
+        if DryRunManager.shared.isEnabled {
+            DryRunManager.shared.logSimulation(
+                action: enable ? "Enable Launch Item" : "Disable Launch Item",
+                target: path
+            )
+            launchItems[index].isToggling = false
+            launchItems[index].isEnabled = enable
+            statusMessage = "[Dry-Run] Simulated \(enable ? "enabling" : "disabling") '\(item.displayName)'."
+            return
+        }
+        
+        launchItems[index].isToggling = true
         let isUserAgent = (item.location == .userAgent)
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var success = false
             var newPath = path
-            
-            if !PerformanceMonitor.isValidLaunchItemPath(path) {
-                AppLogger.security.error("Blocked launch item toggle for unsafe path: \(path)")
-                DispatchQueue.main.async {
-                    guard let idx = self.launchItems.firstIndex(where: { $0.id == item.id }) else { return }
-                    self.launchItems[idx].isToggling = false
-                    self.fetchLaunchItems()
-                }
-                return
-            }
+            var didRename = false
             
             if isUserAgent {
                 // User Launch Agent: Can modify directly without root
                 if enable {
-                    // Rename from .plist.disabled to .plist
                     if path.hasSuffix(".disabled") {
                         let target = String(path.dropLast(".disabled".count))
                         if (try? FileManager.default.moveItem(atPath: path, toPath: target)) != nil {
                             newPath = target
+                            didRename = true
                             success = true
                             let p = Process()
                             p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
                             p.arguments = ["load", target]
+                            p.standardOutput = FileHandle.nullDevice
+                            p.standardError = FileHandle.nullDevice
                             try? p.run()
                             p.waitUntilExit()
                         }
                     } else {
-                        success = true
+                        let p = Process()
+                        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                        p.arguments = ["load", path]
+                        p.standardOutput = FileHandle.nullDevice
+                        p.standardError = FileHandle.nullDevice
+                        do {
+                            try p.run()
+                            p.waitUntilExit()
+                            success = (p.terminationStatus == 0)
+                        } catch {
+                            success = false
+                        }
                     }
                 } else {
-                    // Disable: unload and rename to .plist.disabled
+                    // Disable: unload (ignoring already-unloaded failure) and rename to .plist.disabled
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
                     p.arguments = ["unload", path]
+                    p.standardOutput = FileHandle.nullDevice
+                    p.standardError = FileHandle.nullDevice
                     try? p.run()
                     p.waitUntilExit()
                     
-                    let target = path + ".disabled"
-                    if (try? FileManager.default.moveItem(atPath: path, toPath: target)) != nil {
-                        newPath = target
+                    if path.hasSuffix(".disabled") {
                         success = true
+                    } else {
+                        let target = path + ".disabled"
+                        if (try? FileManager.default.moveItem(atPath: path, toPath: target)) != nil {
+                            newPath = target
+                            didRename = true
+                            success = true
+                        }
                     }
                 }
             } else {
                 // System item: Requires Administrator Privileges
-                let target: String
-                let shellCommand: String
-                if enable {
-                    target = path.hasSuffix(".disabled") ? String(path.dropLast(".disabled".count)) : path
-                    shellCommand = "mv -f \(PerformanceMonitor.posixShellQuote(path)) \(PerformanceMonitor.posixShellQuote(target)) && /bin/launchctl load \(PerformanceMonitor.posixShellQuote(target))"
-                } else {
-                    target = path + ".disabled"
-                    shellCommand = "/bin/launchctl unload \(PerformanceMonitor.posixShellQuote(path)) && mv -f \(PerformanceMonitor.posixShellQuote(path)) \(PerformanceMonitor.posixShellQuote(target))"
-                }
+                let commandPlan = Self.buildSystemLaunchItemToggleCommand(path: path, enable: enable)
+                let shellCommand = commandPlan.shellCommand
+                let target = commandPlan.targetPath
+                didRename = commandPlan.didRename
                 newPath = target
                 
                 let source = "do shell script \"\(PerformanceMonitor.appleScriptStringEscape(shellCommand))\" with administrator privileges"
@@ -384,13 +555,14 @@ public final class PerformanceMonitor: ObservableObject {
             }
             
             DispatchQueue.main.async {
-                guard let idx = self.launchItems.firstIndex(where: { $0.id == item.id }) else { return }
-                self.launchItems[idx].isToggling = false
-                if success {
-                    self.launchItems[idx].isEnabled = enable
-                    self.launchItems[idx].path = newPath
-                } else {
-                    // Revert state on failure
+                if let idx = self.launchItems.firstIndex(where: { $0.id == item.id }) {
+                    self.launchItems[idx].isToggling = false
+                    if success {
+                        self.launchItems[idx].isEnabled = enable
+                        self.launchItems[idx].path = newPath
+                    }
+                }
+                if !success || didRename {
                     self.fetchLaunchItems()
                 }
             }

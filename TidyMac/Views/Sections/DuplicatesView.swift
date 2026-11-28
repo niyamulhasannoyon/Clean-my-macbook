@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct DuplicatesView: View {
     @StateObject private var scanner = DuplicateScanner.shared
@@ -121,7 +124,11 @@ public struct DuplicatesView: View {
                             
                             // Clean Button (Opens Confirmation Modal)
                             Button(action: {
-                                showDeleteConfirmationSheet = true
+                                if scanner.hasGroupWithAllCopiesSelected {
+                                    scanner.reportAllCopiesSelectedError()
+                                } else {
+                                    showDeleteConfirmationSheet = true
+                                }
                             }) {
                                 HStack(spacing: 6) {
                                     if scanner.isCleaning {
@@ -318,8 +325,7 @@ public struct DuplicatesView: View {
                     } else {
                         // Duplicate Groups List
                         VStack(spacing: 12) {
-                            ForEach(scanner.filteredGroups.indices, id: \.self) { idx in
-                                let group = scanner.filteredGroups[idx]
+                            ForEach(scanner.filteredGroups) { group in
                                 DuplicateGroupCard(
                                     group: group,
                                     onToggleFile: { file in
@@ -368,19 +374,8 @@ public struct DuplicatesView: View {
             Button("Cancel", role: .cancel) { singleFileToTrash = nil }
             Button("Move to Trash", role: .destructive) {
                 if let (file, group) = singleFileToTrash {
-                    let fm = FileManager.default
-                    do {
-                        try fm.trashItem(at: file.url, resultingItemURL: nil)
-                        if let gIdx = scanner.duplicateGroups.firstIndex(where: { $0.id == group.id }) {
-                            scanner.duplicateGroups[gIdx].files.removeAll { $0.id == file.id }
-                            if scanner.duplicateGroups[gIdx].files.count < 2 {
-                                scanner.duplicateGroups.remove(at: gIdx)
-                            }
-                        }
-                        scanner.statusMessage = "Moved '\(file.name)' to Trash."
-                        StorageModel.shared.refresh()
-                    } catch {
-                        scanner.statusMessage = "Failed to move '\(file.name)' to Trash: \(error.localizedDescription)"
+                    Task {
+                        await scanner.trashSingleFile(file: file, in: group)
                     }
                 }
                 singleFileToTrash = nil
@@ -466,6 +461,16 @@ private struct DuplicateGroupCard: View {
                             .padding(.vertical, 2)
                             .background(Color.primary.opacity(0.08))
                             .clipShape(Capsule())
+                        
+                        if group.allCopiesSelected {
+                            Text("Keep at least 1 copy")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.18))
+                                .foregroundColor(.orange)
+                                .clipShape(Capsule())
+                        }
                     }
                     
                     HStack(spacing: 6) {

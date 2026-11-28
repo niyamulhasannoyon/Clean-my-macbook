@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct LargeOldFilesView: View {
     @StateObject private var scanner = LargeOldFilesScanner.shared

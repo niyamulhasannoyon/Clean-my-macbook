@@ -1,10 +1,17 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 struct MenuBarView: View {
     @ObservedObject var storage = StorageModel.shared
     @ObservedObject var fdaManager = FullDiskAccessManager.shared
+    @ObservedObject var performanceMonitor = PerformanceMonitor.shared
+    @ObservedObject var junkScanner = SystemJunkScanner.shared
+    @ObservedObject var dryRun = DryRunManager.shared
     @State private var cleanFeedback: String? = nil
+    @State private var cleanFeedbackIsError: Bool = false
     @State private var isCleaning: Bool = false
     
     var body: some View {
@@ -79,25 +86,26 @@ struct MenuBarView: View {
             
             // Memory Section
             VStack(alignment: .leading, spacing: 6) {
+                let clampedMemoryRatio = min(1.0, max(0.0, performanceMonitor.memory.usageRatio))
                 HStack {
                     Label("RAM Usage", systemImage: "memorychip")
                         .font(.system(size: 12, weight: .semibold))
                     Spacer()
-                    Text("58% Used")
+                    Text(String(format: "%.0f%% Used", clampedMemoryRatio * 100))
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
                 
-                ProgressView(value: 0.58)
+                ProgressView(value: clampedMemoryRatio)
                     .progressViewStyle(.linear)
                     .tint(.purple)
                 
                 HStack {
-                    Text("9.3 GB of 16 GB")
+                    Text("\(performanceMonitor.memory.formattedUsed) of \(performanceMonitor.memory.formattedTotal)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text("6.7 GB Available")
+                    Text("\(performanceMonitor.memory.formattedFree) Available")
                         .font(.caption2.weight(.medium))
                         .foregroundColor(.primary)
                 }
@@ -109,11 +117,12 @@ struct MenuBarView: View {
             )
             
             if let feedback = cleanFeedback {
-                HStack {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
+                HStack(spacing: 6) {
+                    Image(systemName: cleanFeedbackIsError ? "exclamationmark.triangle.fill" : (dryRun.isEnabled ? "shield.checkered" : "checkmark.circle.fill"))
+                        .foregroundColor(cleanFeedbackIsError ? .orange : (dryRun.isEnabled ? .orange : .green))
                     Text(feedback)
                         .font(.caption.weight(.medium))
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 4)
@@ -143,27 +152,28 @@ struct MenuBarView: View {
                     }
                     .buttonStyle(.plain)
                 } else {
+                    let isBusy = isCleaning || junkScanner.isScanning || junkScanner.isCleaning
                     Button(action: quickClean) {
                         HStack {
-                            if isCleaning {
+                            if isBusy {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
-                                Image(systemName: "trash")
+                                Image(systemName: dryRun.isEnabled ? "shield.checkered" : "trash")
                             }
-                            Text(isCleaning ? "Cleaning System..." : "Quick Clean (~1.4 GB)")
+                            Text(quickCleanButtonTitle)
                                 .font(.system(size: 12, weight: .semibold))
                             Spacer()
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
                         .frame(maxWidth: .infinity)
-                        .background(Color.blue)
+                        .background(dryRun.isEnabled ? Color.orange : Color.blue)
                         .foregroundColor(.white)
                         .cornerRadius(8)
                     }
                     .buttonStyle(.plain)
-                    .disabled(isCleaning)
+                    .disabled(isBusy)
                 }
                 
                 HStack(spacing: 8) {
@@ -197,15 +207,68 @@ struct MenuBarView: View {
         }
         .padding(14)
         .frame(width: 290)
+        .onAppear {
+            storage.refresh()
+            performanceMonitor.refreshHardwareStats()
+        }
+    }
+    
+    private var quickCleanButtonTitle: String {
+        if junkScanner.isScanning {
+            return "Scanning System Junk..."
+        }
+        if isCleaning || junkScanner.isCleaning {
+            return dryRun.isEnabled ? "Simulating Cleanup..." : "Cleaning System..."
+        }
+        if junkScanner.totalSelectedSize > 0 {
+            return dryRun.isEnabled
+                ? "Quick Clean (\(junkScanner.formattedTotalSelectedSize)) [Dry-Run]"
+                : "Quick Clean (\(junkScanner.formattedTotalSelectedSize))"
+        }
+        return dryRun.isEnabled ? "Quick Clean (Dry-Run)" : "Quick Clean System Junk"
     }
     
     private func quickClean() {
+        guard !isCleaning && !junkScanner.isScanning && !junkScanner.isCleaning else { return }
         isCleaning = true
         cleanFeedback = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        cleanFeedbackIsError = false
+        
+        Task {
+            if junkScanner.categories.allSatisfy({ $0.items.isEmpty }) {
+                await junkScanner.startScan()
+            }
+            
+            guard junkScanner.totalSelectedFilesCount > 0 else {
+                isCleaning = false
+                cleanFeedback = junkScanner.totalFoundFilesCount > 0
+                    ? "No junk items selected for cleanup"
+                    : "System is already clean!"
+                storage.refresh()
+                performanceMonitor.refreshHardwareStats()
+                return
+            }
+            
+            await junkScanner.performClean()
             isCleaning = false
-            cleanFeedback = "Freed 1.4 GB temporary caches!"
+            
+            if let result = junkScanner.lastCleanResult {
+                if result.isDryRun {
+                    cleanFeedback = "[Dry-Run] Simulated \(result.formattedReclaimedSize) (\(result.reclaimedFilesCount) items)"
+                } else if result.reclaimedBytes > 0 {
+                    cleanFeedback = result.errorsCount > 0
+                        ? "Freed \(result.formattedReclaimedSize) (\(result.errorsCount) skipped)"
+                        : "Freed \(result.formattedReclaimedSize) of system junk!"
+                } else if result.errorsCount > 0 {
+                    cleanFeedbackIsError = true
+                    cleanFeedback = "Cleanup failed for \(result.errorsCount) item(s)"
+                } else {
+                    cleanFeedback = "System is already clean!"
+                }
+            }
+            
             storage.refresh()
+            performanceMonitor.refreshHardwareStats()
         }
     }
     

@@ -14,7 +14,15 @@ public final class MaintenanceService: ObservableObject {
     }
     
     private func setupTasks() {
-        self.tasks = [
+        self.tasks = Self.buildDefaultTasks()
+    }
+    
+    public static func buildDefaultTasks(
+        periodicBinaryExists: Bool = FileManager.default.fileExists(atPath: "/usr/sbin/periodic"),
+        uid: uid_t = getuid()
+    ) -> [MaintenanceTask] {
+        let userUID = String(uid)
+        var builtTasks: [MaintenanceTask] = [
             MaintenanceTask(
                 id: "flush_dns",
                 title: "Flush DNS Cache",
@@ -54,29 +62,46 @@ public final class MaintenanceService: ObservableObject {
                 subtitle: "Reset user home folder ACLs and run APFS First Aid check",
                 purpose: "Modern macOS systems utilize a cryptographically sealed, immutable read-only APFS system volume protected by SIP. This task resets user permissions and Access Control Lists (ACLs) on your home folder with 'diskutil resetUserPermissions' and verifies volume structural health.",
                 whenToUse: "Run when facing 'Permission Denied' errors in your home folder or after restoring files from backups.",
-                terminalCommand: "/usr/sbin/diskutil resetUserPermissions / $(id -u) && /usr/sbin/diskutil verifyVolume /",
+                terminalCommand: "/usr/sbin/diskutil resetUserPermissions / \(userUID) && /usr/sbin/diskutil verifyVolume /",
                 requiresAdmin: true,
                 icon: "lock.open.trianglebadge.exclamationmark",
                 tintColor: .orange
-            ),
-            MaintenanceTask(
-                id: "periodic_scripts",
-                title: "Run Periodic Maintenance Scripts",
-                subtitle: "Trigger daily, weekly, and monthly BSD Unix maintenance routines",
-                purpose: "macOS inherits traditional BSD maintenance scripts configured to run daily, weekly, and monthly during middle-of-the-night hours. If your Mac is often asleep or turned off overnight, these jobs are missed. This command immediately executes daily, weekly, and monthly scripts to rotate old log files, clean temporary crash dumps, and vacuum maintenance databases.",
-                whenToUse: "Run once a month or whenever performing comprehensive system tune-ups to keep Unix subsystems clean.",
-                terminalCommand: "/usr/sbin/periodic daily weekly monthly",
-                requiresAdmin: true,
-                icon: "clock.arrow.2.circlepath",
-                tintColor: .pink
             )
         ]
+        
+        // Apple removed /usr/sbin/periodic in macOS 15 Sequoia; only expose it when present.
+        if periodicBinaryExists {
+            builtTasks.append(
+                MaintenanceTask(
+                    id: "periodic_scripts",
+                    title: "Run Periodic Maintenance Scripts",
+                    subtitle: "Trigger daily, weekly, and monthly BSD Unix maintenance routines",
+                    purpose: "macOS inherits traditional BSD maintenance scripts configured to run daily, weekly, and monthly during middle-of-the-night hours. If your Mac is often asleep or turned off overnight, these jobs are missed. This command immediately executes daily, weekly, and monthly scripts to rotate old log files, clean temporary crash dumps, and vacuum maintenance databases.",
+                    whenToUse: "Run once a month or whenever performing comprehensive system tune-ups to keep Unix subsystems clean.",
+                    terminalCommand: "/usr/sbin/periodic daily weekly monthly",
+                    requiresAdmin: true,
+                    icon: "clock.arrow.2.circlepath",
+                    tintColor: .pink
+                )
+            )
+        }
+        
+        return builtTasks
     }
     
     // MARK: - Run Single Task
     public func runTask(id: String) {
+        guard !isRunningAny else { return }
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         let task = tasks[index]
+        
+        if task.id == "periodic_scripts" && !FileManager.default.fileExists(atPath: "/usr/sbin/periodic") {
+            tasks[index].lastRun = Date()
+            tasks[index].outputLog = "Skipped: /usr/sbin/periodic is not available on this macOS version.\n"
+            tasks[index].status = .failed(error: "/usr/sbin/periodic is not available on this macOS version.")
+            return
+        }
+        
         let isDryRun = DryRunManager.shared.isEnabled
         
         tasks[index].status = .running
@@ -131,13 +156,61 @@ public final class MaintenanceService: ObservableObject {
     // MARK: - Run All Tasks Sequentially
     public func runAllTasks() {
         guard !isRunningAny else { return }
+        let isDryRun = DryRunManager.shared.isEnabled
+        let tasksToRun = self.tasks
         isRunningAny = true
+        
+        if isDryRun {
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                for task in tasksToRun {
+                    if task.id == "periodic_scripts" && !FileManager.default.fileExists(atPath: "/usr/sbin/periodic") {
+                        if let idx = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                            self.tasks[idx].lastRun = Date()
+                            self.tasks[idx].outputLog = "Skipped: /usr/sbin/periodic is not available on this macOS version.\n"
+                            self.tasks[idx].status = .failed(error: "/usr/sbin/periodic is not available on this macOS version.")
+                        }
+                        continue
+                    }
+                    
+                    if let idx = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                        self.tasks[idx].status = .running
+                        self.tasks[idx].outputLog = "[DRY-RUN MODE ACTIVE]\nSimulating execution...\nCommand: \(task.terminalCommand)\n"
+                        self.activeTaskId = task.id
+                    }
+                    
+                    DryRunManager.shared.logSimulation(action: "Maintenance Task", target: task.title)
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    
+                    if let idx = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                        self.tasks[idx].lastRun = Date()
+                        self.tasks[idx].outputLog += "\n[DRY-RUN SIMULATION COMPLETE]: No system parameters modified."
+                        self.tasks[idx].status = .success(message: "[Dry-Run] Simulated task successfully!")
+                    }
+                }
+                
+                self.isRunningAny = false
+                self.activeTaskId = nil
+            }
+            return
+        }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            for task in self.tasks {
-                DispatchQueue.main.async {
+            for task in tasksToRun {
+                if task.id == "periodic_scripts" && !FileManager.default.fileExists(atPath: "/usr/sbin/periodic") {
+                    DispatchQueue.main.sync {
+                        if let idx = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                            self.tasks[idx].lastRun = Date()
+                            self.tasks[idx].outputLog = "Skipped: /usr/sbin/periodic is not available on this macOS version.\n"
+                            self.tasks[idx].status = .failed(error: "/usr/sbin/periodic is not available on this macOS version.")
+                        }
+                    }
+                    continue
+                }
+                
+                DispatchQueue.main.sync {
                     if let idx = self.tasks.firstIndex(where: { $0.id == task.id }) {
                         self.tasks[idx].status = .running
                         self.tasks[idx].outputLog = "Starting execution...\nCommand: \(task.terminalCommand)\n"
@@ -164,7 +237,7 @@ public final class MaintenanceService: ObservableObject {
                             self.tasks[idx].status = .success(message: "Task completed successfully!")
                             self.tasks[idx].outputLog += "\n[Status: SUCCESS]"
                         } else {
-                            self.tasks[idx].status = .failed(error: output)
+                            self.tasks[idx].status = .failed(error: output.isEmpty ? "Unknown execution error" : output)
                             self.tasks[idx].outputLog += "\n[Status: FAILED]"
                         }
                     }
@@ -183,12 +256,37 @@ public final class MaintenanceService: ObservableObject {
     }
     
     // MARK: - Command Execution
+    public static func runUserCommand(_ command: String) -> (success: Bool, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", command]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        
+        do {
+            try process.run()
+            // Drain pipe completely BEFORE waitUntilExit() to prevent 64KB pipe buffer deadlocks.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            
+            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let success = process.terminationStatus == 0
+            return (success, output.isEmpty ? "Done." : output)
+        } catch {
+            return (false, "Failed to launch process: \(error.localizedDescription)")
+        }
+    }
+    
     private func executeCommand(command: String, asAdmin: Bool) -> (success: Bool, output: String, cancelled: Bool) {
+        if DryRunManager.shared.isEnabled {
+            return (true, "[Dry-Run] Command execution skipped.", false)
+        }
+        
         if asAdmin {
             // Use AppleScript for elevated administrator prompt
-            let escapedCommand = command
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
+            let escapedCommand = SecurityEscaping.appleScriptStringEscape(command)
             
             let scriptSource = "do shell script \"\(escapedCommand)\" with administrator privileges"
             var errorDict: NSDictionary?
@@ -209,26 +307,8 @@ public final class MaintenanceService: ObservableObject {
             let output = descriptor.stringValue ?? "Command executed without output."
             return (true, output, false)
         } else {
-            // Standard user process
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", command]
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let success = process.terminationStatus == 0
-                return (success, output.isEmpty ? "Done." : output, false)
-            } catch {
-                return (false, "Failed to launch process: \(error.localizedDescription)", false)
-            }
+            let result = Self.runUserCommand(command)
+            return (result.success, result.output, false)
         }
     }
 }

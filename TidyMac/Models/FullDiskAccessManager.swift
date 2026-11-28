@@ -4,67 +4,108 @@ import AppKit
 /// Manages detection and system settings redirection for macOS Full Disk Access (FDA).
 /// FDA is required on macOS to inspect and clean TCC-protected directories such as
 /// ~/Library/Safari, ~/Library/Mail, ~/Library/Application Support, system logs, and caches.
-final class FullDiskAccessManager: ObservableObject {
-    static let shared = FullDiskAccessManager()
+public final class FullDiskAccessManager: ObservableObject {
+    public static let shared = FullDiskAccessManager()
     
     /// Published state indicating whether Full Disk Access is currently granted.
-    @Published var hasFullDiskAccess: Bool = false
+    @Published public var hasFullDiskAccess: Bool = false
     
     /// Controls presentation of the Full Disk Access Onboarding / Guide sheet.
-    @Published var isShowingOnboardingSheet: Bool = false
+    @Published public var isShowingOnboardingSheet: Bool = false
     
     /// Indicates whether a permission verification check is actively running.
-    @Published var isChecking: Bool = false
+    @Published public var isChecking: Bool = false
     
     /// The timestamp of the most recent access verification.
-    @Published var lastChecked: Date? = nil
+    @Published public var lastChecked: Date? = nil
     
     /// Diagnostic probe results mapping test path descriptions to their read outcome.
-    @Published var probeDiagnostics: [String: Bool] = [:]
+    @Published public var probeDiagnostics: [String: Bool] = [:]
     
     /// macOS System Settings deep-link URL for Privacy & Security > Full Disk Access.
-    static let systemSettingsFDAURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
+    public static let systemSettingsFDAURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
     
-    private init() {
-        // Perform initial check on launch
-        checkAccess()
+    private let checkQueue = DispatchQueue(label: "com.tidymac.fda.check", qos: .userInitiated)
+    private var checkGeneration: UInt64 = 0
+    private let probeRunner: () -> (Bool, [String: Bool])
+    
+    private convenience init() {
+        self.init(runInitialCheck: true, observeNotifications: true, probeRunner: nil)
+    }
+    
+    public init(
+        runInitialCheck: Bool = false,
+        observeNotifications: Bool = false,
+        probeRunner: (() -> (Bool, [String: Bool]))? = nil
+    ) {
+        self.probeRunner = probeRunner ?? Self.performFDACheck
         
-        // Automatically re-verify when the app returns to foreground
-        // (e.g. after the user toggles Full Disk Access in System Settings and switches back).
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(applicationDidBecomeActive),
-            name: NSApplication.didBecomeActiveNotification,
-            object: nil
-        )
+        if runInitialCheck {
+            checkAccess()
+        }
+        
+        if observeNotifications {
+            // Automatically re-verify when the app returns to foreground
+            // (e.g. after the user toggles Full Disk Access in System Settings and switches back).
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(applicationDidBecomeActive),
+                name: NSApplication.didBecomeActiveNotification,
+                object: nil
+            )
+        }
     }
     
     @objc private func applicationDidBecomeActive() {
         checkAccess()
     }
     
-    /// Tests for Full Disk Access by attempting to read protected user and system locations.
-    /// Returns true if Full Disk Access is verified.
-    @discardableResult
-    func checkAccess() -> Bool {
-        isChecking = true
-        let (granted, diagnostics) = performFDACheck()
-        
-        DispatchQueue.main.async {
-            self.hasFullDiskAccess = granted
-            self.probeDiagnostics = diagnostics
-            self.lastChecked = Date()
-            self.isChecking = false
+    /// Tests for Full Disk Access asynchronously on a background queue without blocking the main thread.
+    public func checkAccess(completion: ((Bool) -> Void)? = nil) {
+        let startCheckOnMain = { [weak self] in
+            guard let self = self else {
+                completion?(false)
+                return
+            }
+            
+            self.checkGeneration &+= 1
+            let generation = self.checkGeneration
+            self.isChecking = true
+            let runner = self.probeRunner
+            
+            self.checkQueue.async { [weak self] in
+                let (granted, diagnostics) = runner()
+                
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else {
+                        completion?(granted)
+                        return
+                    }
+                    
+                    if self.checkGeneration == generation {
+                        self.hasFullDiskAccess = granted
+                        self.probeDiagnostics = diagnostics
+                        self.lastChecked = Date()
+                        self.isChecking = false
+                    }
+                    completion?(granted)
+                }
+            }
         }
         
-        return granted
+        if Thread.isMainThread {
+            startCheckOnMain()
+        } else {
+            DispatchQueue.main.async(execute: startCheckOnMain)
+        }
     }
     
     /// Low-level test probing known Apple TCC-protected locations.
     /// Under macOS (Ventura, Sonoma, Sequoia), without Full Disk Access,
     /// read operations on these paths fail with Cocoa Error 257 (POSIX EPERM: Operation not permitted).
-    private func performFDACheck() -> (Bool, [String: Bool]) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    private static func performFDACheck() -> (Bool, [String: Bool]) {
+        let fm = FileManager()
+        let home = fm.homeDirectoryForCurrentUser
         
         // Candidate paths protected by Apple TCC
         let testProbes: [(name: String, path: String, isFolder: Bool)] = [
@@ -81,14 +122,14 @@ final class FullDiskAccessManager: ObservableObject {
         
         for probe in testProbes {
             var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: probe.path, isDirectory: &isDir)
+            let exists = fm.fileExists(atPath: probe.path, isDirectory: &isDir)
             guard exists else { continue }
             
             testedLocationsCount += 1
             
             if isDir.boolValue {
                 do {
-                    _ = try FileManager.default.contentsOfDirectory(atPath: probe.path)
+                    _ = try fm.contentsOfDirectory(atPath: probe.path)
                     diagnostics[probe.name] = true
                     readSuccessCount += 1
                 } catch {
@@ -113,7 +154,7 @@ final class FullDiskAccessManager: ObservableObject {
     }
     
     /// Opens macOS System Settings directly to Privacy & Security > Full Disk Access.
-    func openSystemSettings() {
+    public func openSystemSettings() {
         if !NSWorkspace.shared.open(Self.systemSettingsFDAURL) {
             // Fallback for older macOS versions or alternate deep-link
             if let fallbackURL = URL(string: "x-apple.systempreferences:") {

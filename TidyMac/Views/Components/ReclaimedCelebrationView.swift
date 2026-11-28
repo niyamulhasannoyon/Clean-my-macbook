@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct AnimatableByteCountModifier: AnimatableModifier {
     public var bytes: Double

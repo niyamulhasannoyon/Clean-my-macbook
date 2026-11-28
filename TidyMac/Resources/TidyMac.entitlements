@@ -3,10 +3,6 @@
 <plist version="1.0">
 <dict>
     <!-- Hardened Runtime Capabilities for Developer ID Distribution -->
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
     <key>com.apple.security.automation.apple-events</key>
     <true/>
     

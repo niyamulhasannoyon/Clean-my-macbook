@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 /// Reusable banner displayed when an error or warning occurs in any module.
 public struct ModuleErrorBanner: View {

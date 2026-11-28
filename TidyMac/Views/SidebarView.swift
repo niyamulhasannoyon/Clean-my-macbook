@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 struct SidebarView: View {
     @Binding var selectedItem: NavigationItem?

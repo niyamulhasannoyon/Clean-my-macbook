@@ -46,14 +46,17 @@ public struct SmartScanSummary {
     
     public var largeFilesBytes: Int64 = 0
     public var largeFilesCount: Int = 0
-    public var isLargeFilesSelected: Bool = true
+    public var isLargeFilesSelected: Bool = false
+    
+    public var largeFilesFoundBytes: Int64 = 0
+    public var largeFilesFoundCount: Int = 0
     
     public var privacyBytes: Int64 = 0
     public var privacyFilesCount: Int = 0
     public var isPrivacySelected: Bool = true
     
     public var purgeableRAMBytes: Int64 = 0
-    public var performanceTasksCount: Int = 3
+    public var performanceTasksCount: Int = 1
     public var isPerformanceSelected: Bool = true
     
     public init() {}
@@ -65,6 +68,18 @@ public struct SmartScanSummary {
         if isLargeFilesSelected { total += largeFilesBytes }
         if isPrivacySelected { total += privacyBytes }
         return total
+    }
+    
+    public var totalSelectedFilesCount: Int {
+        var total = 0
+        if isJunkSelected { total += junkFilesCount }
+        if isLargeFilesSelected { total += largeFilesCount }
+        if isPrivacySelected { total += privacyFilesCount }
+        return total
+    }
+    
+    public var canCleanAll: Bool {
+        totalCleanableBytes > 0 || isPerformanceSelected
     }
     
     public var formattedTotalCleanable: String {
@@ -79,11 +94,15 @@ public struct SmartScanSummary {
         ByteCountFormatter.string(fromByteCount: largeFilesBytes, countStyle: .file)
     }
     
+    public var formattedLargeFilesFoundSize: String {
+        ByteCountFormatter.string(fromByteCount: largeFilesFoundBytes, countStyle: .file)
+    }
+    
     public var formattedPrivacySize: String {
         ByteCountFormatter.string(fromByteCount: privacyBytes, countStyle: .file)
     }
     
     public var formattedPurgeableRAM: String {
-        ByteCountFormatter.string(fromByteCount: purgeableRAMBytes, countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: purgeableRAMBytes, countStyle: .memory)
     }
 }

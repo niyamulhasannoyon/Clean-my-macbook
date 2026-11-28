@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 
 // MARK: - Browser Type
-public enum BrowserType: String, CaseIterable, Identifiable {
+public enum BrowserType: String, CaseIterable, Identifiable, Sendable {
     case safari = "Safari"
     case chrome = "Google Chrome"
     case firefox = "Mozilla Firefox"
@@ -49,7 +49,7 @@ public enum BrowserType: String, CaseIterable, Identifiable {
 }
 
 // MARK: - Privacy Category
-public enum PrivacyCategory: String, CaseIterable, Identifiable {
+public enum PrivacyCategory: String, CaseIterable, Identifiable, Sendable {
     case history = "Browsing History"
     case cookies = "Cookies & Local Storage"
     case downloads = "Download History"
@@ -68,7 +68,7 @@ public enum PrivacyCategory: String, CaseIterable, Identifiable {
 }
 
 // MARK: - Privacy Item
-public struct PrivacyItem: Identifiable {
+public struct PrivacyItem: Identifiable, Sendable {
     public let id: String
     public let browser: BrowserType
     public let category: PrivacyCategory

@@ -40,36 +40,34 @@ public final class SmartScanCoordinator: ObservableObject {
         state = .scanning(step: currentStepMessage, progress: 0.15, currentModule: .systemJunk)
         
         await junkScanner.startScan()
-        summary.junkBytes = junkScanner.totalFoundSize
-        summary.junkFilesCount = junkScanner.totalFoundFilesCount
+        summary.junkBytes = junkScanner.totalSelectedSize
+        summary.junkFilesCount = junkScanner.totalSelectedFilesCount
+        summary.isJunkSelected = junkScanner.totalSelectedFilesCount > 0
         
-        // Ensure junk items are selected by default for clean
-        junkScanner.toggleSelectAll(true)
-        
-        // 2. Scan Large & Old Files
+        // 2. Scan Large & Old Files (kept unselected by default so users explicitly review personal files)
         progress = 0.40
         currentStepMessage = "2/4: Locating Large & Old Files (>100MB, archives, downloads)..."
         state = .scanning(step: currentStepMessage, progress: 0.45, currentModule: .largeFiles)
         
         await largeFilesScanner.startScan()
-        summary.largeFilesBytes = largeFilesScanner.totalSize
-        summary.largeFilesCount = largeFilesScanner.files.count
-        
-        // For large files, auto-select safe items (e.g. items > 100MB or old DMGs)
-        largeFilesScanner.toggleSelectAll(true)
+        summary.largeFilesFoundBytes = largeFilesScanner.totalSize
+        summary.largeFilesFoundCount = largeFilesScanner.files.count
+        summary.largeFilesBytes = largeFilesScanner.selectedSize
+        summary.largeFilesCount = largeFilesScanner.selectedFiles.count
+        summary.isLargeFilesSelected = false
         
         // 3. Scan Privacy Traces
         progress = 0.70
         currentStepMessage = "3/4: Inspecting Browser Traces & Privacy Items..."
         state = .scanning(step: currentStepMessage, progress: 0.75, currentModule: .privacy)
         
-        privacyScanner.scan()
-        // Wait briefly for privacy scan
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        let privBytes = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        let privCount = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }.reduce(0) { $0 + $1.fileCount }
+        await privacyScanner.scanAsync()
+        let enabledAvailablePrivacy = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }
+        let privBytes = enabledAvailablePrivacy.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let privCount = enabledAvailablePrivacy.reduce(0) { $0 + $1.fileCount }
         summary.privacyBytes = privBytes
         summary.privacyFilesCount = privCount
+        summary.isPrivacySelected = privCount > 0 || privBytes > 0
         
         // 4. Performance & Hardware Analysis
         progress = 0.90
@@ -79,10 +77,9 @@ public final class SmartScanCoordinator: ObservableObject {
         performanceMonitor.refreshHardwareStats()
         performanceMonitor.fetchLaunchItems()
         
-        // Memory metrics (reported separately as memory optimization, never conflated with disk space)
-        let usedRAM = performanceMonitor.memory.usedBytes
-        summary.purgeableRAMBytes = Int64(Double(usedRAM) * 0.15)
-        summary.performanceTasksCount = maintenanceService.tasks.count
+        // Actual inactive RAM from macOS VM stats (informational only, never conflated with disk space)
+        summary.purgeableRAMBytes = Int64(clamping: performanceMonitor.memory.inactiveBytes)
+        summary.performanceTasksCount = 1
         
         progress = 1.0
         let elapsed = Date().timeIntervalSince(startTime)
@@ -106,7 +103,7 @@ public final class SmartScanCoordinator: ObservableObject {
         var errors: Int = 0
         
         // 1. Clean System Junk
-        if summary.isJunkSelected {
+        if summary.isJunkSelected && junkScanner.totalSelectedFilesCount > 0 {
             state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating System Junk cleanup..." : "Cleaning System Junk & Caches...", progress: 0.25)
             progress = 0.25
             await junkScanner.performClean()
@@ -142,30 +139,31 @@ public final class SmartScanCoordinator: ObservableObject {
             if !activeBrowsers.isEmpty && !isDryRun {
                 AppLogger.cleanup.warning("Smart Scan: skipped privacy cleanup for active browsers to protect unsaved work: \(activeBrowsers.map { $0.rawValue })")
             } else {
-                let (reclaimed, files, cleanErrors) = privacyScanner.performSynchronousClean()
+                let (reclaimed, files, cleanErrors) = await privacyScanner.performCleanAsync()
                 totalReclaimed += reclaimed
                 totalFilesCleaned += files
                 errors += cleanErrors
             }
         }
         
-        // 4. Optimize Performance & Flush Caches
+        // 4. Flush DNS Cache
         if summary.isPerformanceSelected {
-            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating RAM flush..." : "Optimizing memory & flushing DNS...", progress: 0.95)
+            state = .cleaning(step: isDryRun ? "[Dry-Run] Simulating DNS cache flush..." : "Flushing DNS Cache...", progress: 0.95)
             progress = 0.95
             
             if isDryRun {
-                DryRunManager.shared.logSimulation(action: "Flush Cache & Optimize RAM", target: "System Memory")
+                DryRunManager.shared.logSimulation(action: "Flush DNS Cache", target: "System DNS Resolver")
             } else {
-                // Execute quick safe memory/resolver flush
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-                proc.arguments = ["-flushcache"]
-                try? proc.run()
-                proc.waitUntilExit()
+                await Task.detached(priority: .userInitiated) {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
+                    proc.arguments = ["-flushcache"]
+                    try? proc.run()
+                    proc.waitUntilExit()
+                }.value
                 AppLogger.performance.info("Smart Scan: flushed DNS cache")
             }
-            // Purgeable RAM is memory, NOT disk storage: do not add to totalReclaimed disk bytes!
+            // Inactive RAM is memory, NOT disk storage: do not add to totalReclaimed disk bytes.
         }
         
         progress = 1.0

@@ -50,12 +50,31 @@ public struct CPUMetrics {
     public var systemPercent: Double = 0.0
     public var idlePercent: Double = 100.0
     
+    public init(
+        usageRatio: Double = 0.0,
+        coreCount: Int = ProcessInfo.processInfo.activeProcessorCount,
+        userPercent: Double = 0.0,
+        systemPercent: Double = 0.0,
+        idlePercent: Double = 100.0
+    ) {
+        self.usageRatio = usageRatio
+        self.coreCount = coreCount
+        self.userPercent = userPercent
+        self.systemPercent = systemPercent
+        self.idlePercent = idlePercent
+    }
+    
     public var formattedPercent: String {
         String(format: "%.1f%%", usageRatio * 100)
     }
     
     public var modelDescription: String {
-        "Apple Silicon • \(coreCount) Cores"
+        #if arch(arm64)
+        let architecture = "Apple Silicon"
+        #else
+        let architecture = "Intel"
+        #endif
+        return "\(architecture) • \(coreCount) Cores"
     }
 }
 

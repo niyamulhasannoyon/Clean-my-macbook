@@ -38,7 +38,7 @@ public struct DeletionRecord: Identifiable, Codable {
     }
 }
 
-public final class DeletionLogManager: ObservableObject {
+public final class DeletionLogManager: ObservableObject, @unchecked Sendable {
     public static let shared = DeletionLogManager()
     
     @Published public private(set) var records: [DeletionRecord] = []
@@ -46,12 +46,20 @@ public final class DeletionLogManager: ObservableObject {
     private let logFileURL: URL
     private let queue = DispatchQueue(label: "com.tidymac.deletionlog", qos: .utility)
     
-    private init() {
+    private convenience init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         let tidyMacDir = appSupport.appendingPathComponent("TidyMac", isDirectory: true)
-        
-        try? FileManager.default.createDirectory(at: tidyMacDir, withIntermediateDirectories: true)
-        self.logFileURL = tidyMacDir.appendingPathComponent("deletion_history.json")
+        self.init(storageDirectory: tidyMacDir)
+    }
+    
+    public convenience init(storageDirectory: URL) {
+        try? FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        self.init(logFileURL: storageDirectory.appendingPathComponent("deletion_history.json"))
+    }
+    
+    public init(logFileURL: URL) {
+        self.logFileURL = logFileURL
+        try? FileManager.default.createDirectory(at: logFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         loadRecords()
     }
     
@@ -72,7 +80,7 @@ public final class DeletionLogManager: ObservableObject {
             errorMessage: errorMessage
         )
         
-        queue.async { [weak self] in
+        let updateAndPersist = { [weak self] in
             guard let self = self else { return }
             self.records.insert(record, at: 0)
             
@@ -81,37 +89,67 @@ public final class DeletionLogManager: ObservableObject {
                 self.records = Array(self.records.prefix(500))
             }
             
-            self.persistRecords()
+            let snapshot = self.records
+            self.queue.async { [weak self] in
+                self?.persistRecords(snapshot)
+            }
             
             AppLogger.cleanup.info("Deletion logged: [\(sourceModule)] \(path) -> \(destination.rawValue) (Success: \(isSuccess))")
+        }
+        
+        if Thread.isMainThread {
+            updateAndPersist()
+        } else {
+            DispatchQueue.main.async(execute: updateAndPersist)
         }
     }
     
     private func loadRecords() {
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            guard FileManager.default.fileExists(atPath: self.logFileURL.path),
-                  let data = try? Data(contentsOf: self.logFileURL),
-                  let loaded = try? JSONDecoder().decode([DeletionRecord].self, from: data) else {
-                return
-            }
+        guard FileManager.default.fileExists(atPath: self.logFileURL.path),
+              let data = try? Data(contentsOf: self.logFileURL),
+              let loaded = try? JSONDecoder().decode([DeletionRecord].self, from: data) else {
+            return
+        }
+        self.records = Array(loaded.prefix(500))
+    }
+    
+    /// Waits for all queued disk persistence writes to complete.
+    public func flush() {
+        queue.sync {}
+    }
+    
+    /// Waits for any main-queue record mutations and subsequent disk persistence writes to complete.
+    public func flushAsync() async {
+        let persistenceQueue = self.queue
+        await withCheckedContinuation { continuation in
             DispatchQueue.main.async {
-                self.records = loaded
+                persistenceQueue.async {
+                    continuation.resume()
+                }
             }
         }
     }
     
-    private func persistRecords() {
-        guard let data = try? JSONEncoder().encode(self.records) else { return }
+    private func persistRecords(_ snapshot: [DeletionRecord]) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: self.logFileURL, options: .atomic)
     }
     
     public func clearHistory() {
-        queue.async { [weak self] in
+        let clearOnMain = { [weak self] in
             guard let self = self else { return }
             self.records.removeAll()
-            try? FileManager.default.removeItem(at: self.logFileURL)
-            AppLogger.cleanup.info("Deletion history cleared by user.")
+            self.queue.async { [weak self] in
+                guard let self = self else { return }
+                try? FileManager.default.removeItem(at: self.logFileURL)
+                AppLogger.cleanup.info("Deletion history cleared by user.")
+            }
+        }
+        
+        if Thread.isMainThread {
+            clearOnMain()
+        } else {
+            DispatchQueue.main.async(execute: clearOnMain)
         }
     }
 }

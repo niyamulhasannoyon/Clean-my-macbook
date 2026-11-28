@@ -1,9 +1,53 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
+
+private final class TreemapLayoutCache: ObservableObject {
+    private struct CacheKey: Equatable {
+        let nodeID: UUID?
+        let nodeSize: Int64
+        let childSignatures: [ChildSignature]
+        let size: CGSize
+
+        struct ChildSignature: Equatable {
+            let id: UUID
+            let size: Int64
+        }
+    }
+
+    private var lastKey: CacheKey?
+    private var cachedItems: [TreemapItem] = []
+
+    func items(for currentNode: DiskNode?, children: [DiskNode], size: CGSize) -> [TreemapItem] {
+        let signatures = children.map {
+            CacheKey.ChildSignature(id: $0.id, size: $0.size)
+        }
+        let key = CacheKey(
+            nodeID: currentNode?.id,
+            nodeSize: currentNode?.size ?? 0,
+            childSignatures: signatures,
+            size: size
+        )
+
+        if key == lastKey {
+            return cachedItems
+        }
+
+        let computed = TreemapLayoutEngine.layout(
+            nodes: children,
+            in: CGRect(origin: .zero, size: size),
+            padding: 2.0
+        )
+        lastKey = key
+        cachedItems = computed
+        return computed
+    }
+}
 
 public struct DiskTreemapCanvas: View {
     @ObservedObject var scanner: DiskSpaceScanner
-    
-    @State private var hoverLocation: CGPoint? = nil
+    @StateObject private var layoutCache = TreemapLayoutCache()
     
     public init(scanner: DiskSpaceScanner) {
         self.scanner = scanner
@@ -13,11 +57,7 @@ public struct DiskTreemapCanvas: View {
         GeometryReader { proxy in
             let size = proxy.size
             let children = (scanner.currentNode?.children ?? []).filter { $0.size > 0 }
-            let items = TreemapLayoutEngine.layout(
-                nodes: children,
-                in: CGRect(origin: .zero, size: size),
-                padding: 2.0
-            )
+            let items = layoutCache.items(for: scanner.currentNode, children: children, size: size)
             
             ZStack {
                 Canvas { context, canvasSize in
@@ -59,35 +99,42 @@ public struct DiskTreemapCanvas: View {
                             )
                         }
                         
-                        // Text Labels
-                        if rect.width > 55 && rect.height > 24 {
-                            let title = item.node.name
-                            let titleText = Text(title)
-                                .font(.system(size: rect.width > 90 ? 11 : 9, weight: .bold))
-                                .foregroundColor(.white)
+                        // Clip text & badge drawing to tile path so long names don't bleed into adjacent tiles
+                        context.drawLayer { layerContext in
+                            layerContext.clip(to: path)
                             
-                            let textOrigin = CGPoint(x: rect.minX + 6, y: rect.minY + 6)
-                            context.draw(titleText, at: textOrigin, anchor: .topLeading)
-                        }
-                        
-                        if rect.width > 65 && rect.height > 44 {
-                            let sizeStr = item.node.formattedSize
-                            let sizeText = Text(sizeStr)
-                                .font(.system(size: rect.width > 90 ? 10 : 8, weight: .medium, design: .rounded))
-                                .foregroundColor(.white.opacity(0.9))
+                            if rect.width > 55 && rect.height > 24 {
+                                let title = item.node.name
+                                let titleText = Text(title)
+                                    .font(.system(size: rect.width > 90 ? 11 : 9, weight: .bold))
+                                    .foregroundColor(.white)
+                                
+                                let textOrigin = CGPoint(x: rect.minX + 6, y: rect.minY + 6)
+                                layerContext.draw(titleText, at: textOrigin, anchor: .topLeading)
+                            }
                             
-                            let sizeOrigin = CGPoint(x: rect.minX + 6, y: rect.minY + 22)
-                            context.draw(sizeText, at: sizeOrigin, anchor: .topLeading)
-                        }
-                        
-                        // Folder indicator icon for directories
-                        if item.node.isDirectory && rect.width > 40 && rect.height > 40 {
-                            let iconText = Text(Image(systemName: item.node.children.isEmpty ? "folder" : "folder.fill"))
-                                .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.75))
+                            if rect.width > 65 && rect.height > 44 {
+                                let sizeStr = item.node.formattedSize
+                                let sizeText = Text(sizeStr)
+                                    .font(.system(size: rect.width > 90 ? 10 : 8, weight: .medium, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.9))
+                                
+                                let sizeOrigin = CGPoint(x: rect.minX + 6, y: rect.minY + 22)
+                                layerContext.draw(sizeText, at: sizeOrigin, anchor: .topLeading)
+                            }
                             
-                            let iconOrigin = CGPoint(x: rect.maxX - 14, y: rect.minY + 12)
-                            context.draw(iconText, at: iconOrigin, anchor: .center)
+                            // Folder indicator icon for directories
+                            if item.node.isDirectory && rect.width > 40 && rect.height > 40 {
+                                let symbolName = item.node.isVirtual
+                                    ? "square.stack.3d.up.fill"
+                                    : (item.node.canDrillDown ? "folder.fill" : "folder")
+                                let iconText = Text(Image(systemName: symbolName))
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.white.opacity(0.75))
+                                
+                                let iconOrigin = CGPoint(x: rect.maxX - 14, y: rect.minY + 12)
+                                layerContext.draw(iconText, at: iconOrigin, anchor: .center)
+                            }
                         }
                     }
                 }
@@ -96,22 +143,22 @@ public struct DiskTreemapCanvas: View {
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
-                        hoverLocation = location
                         if let hit = items.first(where: { $0.rect.contains(location) }) {
                             if scanner.hoveredNode?.id != hit.node.id {
                                 scanner.hoveredNode = hit.node
                             }
-                        } else {
+                        } else if scanner.hoveredNode != nil {
                             scanner.hoveredNode = nil
                         }
                     case .ended:
-                        hoverLocation = nil
-                        scanner.hoveredNode = nil
+                        if scanner.hoveredNode != nil {
+                            scanner.hoveredNode = nil
+                        }
                     }
                 }
                 .onTapGesture { location in
                     if let hit = items.first(where: { $0.rect.contains(location) }) {
-                        if hit.node.isDirectory && !hit.node.children.isEmpty {
+                        if hit.node.canDrillDown {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                                 scanner.drillDown(to: hit.node)
                             }

@@ -2,27 +2,27 @@ import Foundation
 import Combine
 import SwiftUI
 
-class StorageModel: ObservableObject {
-    @Published var totalBytes: Int64 = 0
-    @Published var freeBytes: Int64 = 0
-    @Published var usedBytes: Int64 = 0
-    @Published var usedFraction: Double = 0.0
-    @Published var isRefreshing: Bool = false
+public class StorageModel: ObservableObject {
+    @Published public var totalBytes: Int64 = 0
+    @Published public var freeBytes: Int64 = 0
+    @Published public var usedBytes: Int64 = 0
+    @Published public var usedFraction: Double = 0.0
+    @Published public var isRefreshing: Bool = false
     
     // Category Breakdown Estimates
-    @Published var systemBytes: Int64 = 0
-    @Published var appsBytes: Int64 = 0
-    @Published var documentsBytes: Int64 = 0
-    @Published var cachesBytes: Int64 = 0
-    @Published var otherBytes: Int64 = 0
+    @Published public var systemBytes: Int64 = 0
+    @Published public var appsBytes: Int64 = 0
+    @Published public var documentsBytes: Int64 = 0
+    @Published public var cachesBytes: Int64 = 0
+    @Published public var otherBytes: Int64 = 0
     
-    static let shared = StorageModel()
+    public static let shared = StorageModel()
     
-    init() {
+    public init() {
         refresh()
     }
     
-    func refresh() {
+    public func refresh() {
         isRefreshing = true
         let fileURL = URL(fileURLWithPath: "/")
         do {
@@ -67,23 +67,23 @@ class StorageModel: ObservableObject {
         self.otherBytes = 15 * 1024 * 1024 * 1024
     }
     
-    var formattedTotal: String {
+    public var formattedTotal: String {
         ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
     }
     
-    var formattedFree: String {
+    public var formattedFree: String {
         ByteCountFormatter.string(fromByteCount: freeBytes, countStyle: .file)
     }
     
-    var formattedUsed: String {
+    public var formattedUsed: String {
         ByteCountFormatter.string(fromByteCount: usedBytes, countStyle: .file)
     }
     
-    var percentUsedString: String {
+    public var percentUsedString: String {
         String(format: "%.0f%%", usedFraction * 100)
     }
     
-    var percentFreeString: String {
+    public var percentFreeString: String {
         String(format: "%.0f%%", (1.0 - usedFraction) * 100)
     }
 }

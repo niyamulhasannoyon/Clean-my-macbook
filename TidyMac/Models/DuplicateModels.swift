@@ -55,15 +55,19 @@ public struct DuplicateFileItem: Identifiable, Hashable {
         self.isKeptOriginal = isKeptOriginal
     }
     
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+    
     public var formattedSize: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
     
     public var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: modificationDate)
+        Self.dateFormatter.string(from: modificationDate)
     }
 }
 

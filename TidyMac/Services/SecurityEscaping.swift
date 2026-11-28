@@ -7,14 +7,34 @@ public enum SecurityEscaping {
     /// Validates whether a file path is a permitted macOS launch item location.
     /// Strictly restricts paths to /Library/LaunchDaemons, /Library/LaunchAgents, or ~/Library/LaunchAgents.
     public static func isValidLaunchItemPath(_ path: String, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
-        let cleanPath = (path as NSString).standardizingPath
-        let userAgentsPath = homeDirectory.appendingPathComponent("Library/LaunchAgents").path
+        // Reject empty, relative, dot-dot traversal components, or control-character inputs before URL resolution
+        guard !path.isEmpty,
+              path.hasPrefix("/"),
+              !path.contains("\0"),
+              !path.contains("\n"),
+              !path.contains("\r"),
+              !path.split(separator: "/").contains("..") else {
+            return false
+        }
+        
+        let cleanPath = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+            .lowercased()
+        
+        let userAgentsPath = homeDirectory
+            .appendingPathComponent("Library/LaunchAgents")
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+        let userAgentsPrefix = userAgentsPath.hasSuffix("/") ? userAgentsPath : userAgentsPath + "/"
         
         let allowedPrefixes = [
-            "/Library/LaunchDaemons",
-            "/Library/LaunchAgents",
-            userAgentsPath
-        ]
+            "/Library/LaunchDaemons/",
+            "/Library/LaunchAgents/",
+            userAgentsPrefix
+        ].map { $0.lowercased() }
         
         guard allowedPrefixes.contains(where: { cleanPath.hasPrefix($0) }) else {
             return false

@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct AppUninstallerView: View {
     @StateObject private var scanner = AppUninstallerScanner.shared
@@ -312,17 +315,18 @@ public struct AppUninstallerView: View {
                 
                 Spacer()
                 
-                if !scanner.orphanedGroups.isEmpty {
+                if !scanner.filteredOrphanedGroups.isEmpty {
+                    let filteredIDs = Set(scanner.filteredOrphanedGroups.map(\.id))
+                    let allSelected = scanner.filteredOrphanedGroups.allSatisfy { $0.isSelected }
                     Button(action: {
-                        let allSelected = scanner.orphanedGroups.allSatisfy { $0.isSelected }
-                        for idx in scanner.orphanedGroups.indices {
+                        for idx in scanner.orphanedGroups.indices where filteredIDs.contains(scanner.orphanedGroups[idx].id) {
                             scanner.orphanedGroups[idx].isSelected = !allSelected
                             for itemIdx in scanner.orphanedGroups[idx].items.indices {
                                 scanner.orphanedGroups[idx].items[itemIdx].isSelected = !allSelected
                             }
                         }
                     }) {
-                        Text(scanner.orphanedGroups.allSatisfy { $0.isSelected } ? "Deselect All" : "Select All")
+                        Text(allSelected ? "Deselect All" : "Select All")
                             .font(.caption.weight(.medium))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
@@ -362,12 +366,12 @@ public struct AppUninstallerView: View {
                         }
                         .padding(.horizontal, 18)
                         .padding(.vertical, 10)
-                        .background(scanner.selectedOrphanedSize > 0 ? Color.red : Color.gray.opacity(0.3))
+                        .background(scanner.hasSelectedOrphans ? Color.red : Color.gray.opacity(0.3))
                         .foregroundColor(.white)
                         .cornerRadius(10)
                     }
                     .buttonStyle(.plain)
-                    .disabled(scanner.selectedOrphanedSize == 0 || scanner.isCleaning)
+                    .disabled(!scanner.hasSelectedOrphans || scanner.isCleaning)
                 }
                 .padding(14)
                 .background(
@@ -378,17 +382,33 @@ public struct AppUninstallerView: View {
             
             // Orphaned Groups List
             if scanner.filteredOrphanedGroups.isEmpty {
+                let hasSearchQuery = !scanner.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 emptyStateCard(
-                    icon: "checkmark.seal.fill",
-                    title: "No Orphaned Residuals Found",
-                    subtitle: "All leftover directories in Application Support, Caches, Containers, and Preferences belong to currently installed applications."
+                    icon: hasSearchQuery ? "magnifyingglass" : "checkmark.seal.fill",
+                    title: hasSearchQuery ? "No Matching Orphaned Residuals" : "No Orphaned Residuals Found",
+                    subtitle: hasSearchQuery
+                        ? "No orphaned leftover groups match '\(scanner.searchText)'."
+                        : "All leftover directories in Application Support, Caches, Containers, and Preferences belong to currently installed applications."
                 )
             } else {
-                ForEach($scanner.orphanedGroups) { $group in
-                    OrphanedGroupCard(group: $group)
+                ForEach(scanner.filteredOrphanedGroups) { group in
+                    OrphanedGroupCard(group: bindingForOrphanedGroup(id: group.id, fallback: group))
                 }
             }
         }
+    }
+    
+    private func bindingForOrphanedGroup(id: UUID, fallback: OrphanedAppGroup) -> Binding<OrphanedAppGroup> {
+        Binding(
+            get: {
+                scanner.orphanedGroups.first(where: { $0.id == id }) ?? fallback
+            },
+            set: { updatedGroup in
+                if let idx = scanner.orphanedGroups.firstIndex(where: { $0.id == id }) {
+                    scanner.orphanedGroups[idx] = updatedGroup
+                }
+            }
+        )
     }
     
     // MARK: - Reusable Empty State Card
@@ -600,18 +620,35 @@ struct AppDetailCard: View {
                     
                     Spacer()
                     
-                    if !app.leftovers.isEmpty {
-                        Button(action: {
-                            toggleAllLeftovers()
-                        }) {
-                            Text(isAllLeftoversSelected ? "Deselect All" : "Select All")
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.primary.opacity(0.06))
-                                .cornerRadius(6)
+                    HStack(spacing: 8) {
+                        Button(action: onRefreshLeftovers) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Refresh")
+                            }
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
                         }
                         .buttonStyle(.plain)
+                        .disabled(scanner.isScanning || scanner.isScanningLeftovers || scanner.isCleaning)
+                        .help("Rescan leftover files for \(app.name)")
+                        
+                        if !app.leftovers.isEmpty {
+                            Button(action: {
+                                toggleAllLeftovers()
+                            }) {
+                                Text(isAllLeftoversSelected ? "Deselect All" : "Select All")
+                                    .font(.caption.weight(.medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.primary.opacity(0.06))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
                 
@@ -630,8 +667,8 @@ struct AppDetailCard: View {
                 } else {
                     // Itemized Leftovers List
                     VStack(spacing: 8) {
-                        ForEach(app.leftovers.indices, id: \.self) { idx in
-                            LeftoverItemRow(item: bindingForLeftover(idx: idx))
+                        ForEach(app.leftovers) { leftover in
+                            LeftoverItemRow(item: bindingForLeftover(id: leftover.id, fallback: leftover))
                         }
                     }
                 }
@@ -680,6 +717,7 @@ struct AppDetailCard: View {
                         .cornerRadius(10)
                     }
                     .buttonStyle(.plain)
+                    .disabled(scanner.isCleaning)
                 }
             }
             .padding(14)
@@ -692,7 +730,7 @@ struct AppDetailCard: View {
     }
     
     private var isAllLeftoversSelected: Bool {
-        app.leftovers.allSatisfy { $0.isSelected }
+        !app.leftovers.isEmpty && app.leftovers.allSatisfy { $0.isSelected }
     }
     
     private func toggleAllLeftovers() {
@@ -703,19 +741,19 @@ struct AppDetailCard: View {
         }
     }
     
-    private func bindingForLeftover(idx: Int) -> Binding<AppLeftoverItem> {
+    private func bindingForLeftover(id: UUID, fallback: AppLeftoverItem) -> Binding<AppLeftoverItem> {
         Binding(
             get: {
                 if let appIdx = scanner.installedApps.firstIndex(where: { $0.id == app.id }),
-                   idx < scanner.installedApps[appIdx].leftovers.count {
-                    return scanner.installedApps[appIdx].leftovers[idx]
+                   let item = scanner.installedApps[appIdx].leftovers.first(where: { $0.id == id }) {
+                    return item
                 }
-                return app.leftovers[idx]
+                return app.leftovers.first(where: { $0.id == id }) ?? fallback
             },
             set: { updatedItem in
                 if let appIdx = scanner.installedApps.firstIndex(where: { $0.id == app.id }),
-                   idx < scanner.installedApps[appIdx].leftovers.count {
-                    scanner.installedApps[appIdx].leftovers[idx] = updatedItem
+                   let lIdx = scanner.installedApps[appIdx].leftovers.firstIndex(where: { $0.id == id }) {
+                    scanner.installedApps[appIdx].leftovers[lIdx] = updatedItem
                 }
             }
         )
@@ -798,24 +836,49 @@ struct OrphanedGroupCard: View {
     @Binding var group: OrphanedAppGroup
     @State private var isExpanded: Bool = true
     
+    private var groupSelectionBinding: Binding<Bool> {
+        Binding(
+            get: { group.isSelected },
+            set: { newValue in
+                var updated = group
+                updated.isSelected = newValue
+                for idx in updated.items.indices {
+                    updated.items[idx].isSelected = newValue
+                }
+                group = updated
+            }
+        )
+    }
+    
+    private func bindingForItemSelection(id: UUID, fallback: Bool) -> Binding<Bool> {
+        Binding(
+            get: {
+                group.items.first(where: { $0.id == id })?.isSelected ?? fallback
+            },
+            set: { newValue in
+                var updated = group
+                if let idx = updated.items.firstIndex(where: { $0.id == id }) {
+                    updated.items[idx].isSelected = newValue
+                }
+                updated.isSelected = !updated.items.isEmpty && updated.items.allSatisfy { $0.isSelected }
+                group = updated
+            }
+        )
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Group Header
             HStack(spacing: 12) {
-                Toggle("", isOn: $group.isSelected)
+                Toggle("", isOn: groupSelectionBinding)
                     .toggleStyle(.checkbox)
                     .labelsHidden()
-                    .onChange(of: group.isSelected) { newValue in
-                        for idx in group.items.indices {
-                            group.items[idx].isSelected = newValue
-                        }
-                    }
                 
                 ZStack {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(Color.orange.opacity(0.15))
                         .frame(width: 32, height: 32)
-                    Image(systemName: "ghost.fill")
+                    Image(systemName: "questionmark.folder.fill")
                         .font(.system(size: 16))
                         .foregroundColor(.orange)
                 }
@@ -864,9 +927,9 @@ struct OrphanedGroupCard: View {
             // Sub-items
             if isExpanded {
                 VStack(spacing: 6) {
-                    ForEach($group.items) { $item in
+                    ForEach(group.items) { item in
                         HStack(spacing: 10) {
-                            Toggle("", isOn: $item.isSelected)
+                            Toggle("", isOn: bindingForItemSelection(id: item.id, fallback: item.isSelected))
                                 .toggleStyle(.checkbox)
                                 .labelsHidden()
                                 .padding(.leading, 12)

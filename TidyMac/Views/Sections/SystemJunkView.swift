@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct SystemJunkView: View {
     @StateObject private var scanner = SystemJunkScanner.shared
@@ -29,7 +32,7 @@ public struct SystemJunkView: View {
                         ModuleErrorBanner(
                             message: err,
                             onRetry: {
-                                Task { await scanner.startScan() }
+                                triggerScanIfPermitted(showOnboardingIfDenied: true)
                             },
                             onDismiss: {
                                 scanner.scanError = nil
@@ -70,13 +73,7 @@ public struct SystemJunkView: View {
                             
                             // Scan / Rescan Button
                             Button(action: {
-                                if !fdaManager.hasFullDiskAccess {
-                                    fdaManager.isShowingOnboardingSheet = true
-                                } else {
-                                    Task {
-                                        await scanner.startScan()
-                                    }
-                                }
+                                triggerScanIfPermitted(showOnboardingIfDenied: true)
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: !fdaManager.hasFullDiskAccess ? "lock.fill" : (scanner.isScanning ? "arrow.triangle.2.circlepath" : "arrow.clockwise"))
@@ -171,7 +168,7 @@ public struct SystemJunkView: View {
                         Divider()
                             .padding(.vertical, 2)
                         
-                        // Selection and Options Bar
+                        // Selection Bar
                         HStack {
                             Button(action: {
                                 scanner.toggleSelectAll(!scanner.allSelected)
@@ -187,23 +184,6 @@ public struct SystemJunkView: View {
                             .disabled(scanner.categories.isEmpty || scanner.isScanning)
                             
                             Spacer()
-                            
-                            // Optional Language Files Toggle
-                            Toggle(isOn: $scanner.includeUnusedLanguages) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "character.book.closed")
-                                        .foregroundColor(.pink)
-                                    Text("Include Language Files (.lproj)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .toggleStyle(.checkbox)
-                            .onChange(of: scanner.includeUnusedLanguages) { _ in
-                                Task {
-                                    await scanner.startScan()
-                                }
-                            }
                         }
                     }
                     .padding(16)
@@ -222,11 +202,10 @@ public struct SystemJunkView: View {
                                 .font(.headline)
                                 .foregroundColor(.secondary)
                             Button("Start Scan Now") {
-                                Task {
-                                    await scanner.startScan()
-                                }
+                                triggerScanIfPermitted(showOnboardingIfDenied: true)
                             }
                             .buttonStyle(.borderedProminent)
+                            .disabled(scanner.isScanning || scanner.isCleaning)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 40)
@@ -251,8 +230,8 @@ public struct SystemJunkView: View {
             }
         }
         .task {
-            // Automatically scan if first time
-            if scanner.categories.allSatisfy({ $0.items.isEmpty }) && !scanner.isScanning {
+            // Automatically scan if first time and Full Disk Access is granted
+            if fdaManager.hasFullDiskAccess && !scanner.isScanning && scanner.categories.allSatisfy({ $0.items.isEmpty }) {
                 await scanner.startScan()
             }
         }
@@ -269,6 +248,18 @@ public struct SystemJunkView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Selected junk files will be moved safely to your macOS Trash bin. You can review or restore them anytime in Finder.")
+        }
+    }
+    
+    private func triggerScanIfPermitted(showOnboardingIfDenied: Bool) {
+        guard fdaManager.hasFullDiskAccess && !scanner.isScanning else {
+            if !fdaManager.hasFullDiskAccess && showOnboardingIfDenied {
+                fdaManager.isShowingOnboardingSheet = true
+            }
+            return
+        }
+        Task {
+            await scanner.startScan()
         }
     }
     

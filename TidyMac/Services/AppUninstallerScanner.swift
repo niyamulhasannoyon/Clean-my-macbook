@@ -26,10 +26,37 @@ public class AppUninstallerScanner: ObservableObject {
     @Published public var showCelebration: Bool = false
     @Published public var scanError: String? = nil
     
-    private let fileManager = FileManager.default
-    private let homeURL = FileManager.default.homeDirectoryForCurrentUser
+    private let homeURL: URL
+    private let appDirectories: [URL]
+    private let systemAppDirectories: [URL]
+    private let deletionLogManager: DeletionLogManager
     
-    public init() {}
+    public convenience init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.init(
+            homeURL: home,
+            appDirectories: [
+                URL(fileURLWithPath: "/Applications"),
+                home.appendingPathComponent("Applications")
+            ]
+        )
+    }
+    
+    public init(
+        homeURL: URL,
+        appDirectories: [URL],
+        systemAppDirectories: [URL] = [
+            URL(fileURLWithPath: "/System/Applications"),
+            URL(fileURLWithPath: "/System/Applications/Utilities"),
+            URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications")
+        ],
+        deletionLogManager: DeletionLogManager = .shared
+    ) {
+        self.homeURL = homeURL
+        self.appDirectories = appDirectories
+        self.systemAppDirectories = systemAppDirectories
+        self.deletionLogManager = deletionLogManager
+    }
     
     // MARK: - Selected App Helper
     public var selectedApp: InstalledApp? {
@@ -111,92 +138,86 @@ public class AppUninstallerScanner: ObservableObject {
         ByteCountFormatter.string(fromByteCount: selectedOrphanedSize, countStyle: .file)
     }
     
+    public var hasSelectedOrphans: Bool {
+        orphanedGroups.contains { $0.items.contains { $0.isSelected } }
+    }
+    
     // MARK: - Full Scan Action
     public func scanAll() async {
         guard !isScanning else { return }
         isScanning = true
+        scanError = nil
         scanProgress = 0.0
         statusMessage = "Discovering installed applications in /Applications and ~/Applications..."
         
-        let appDirectories: [URL] = [
-            URL(fileURLWithPath: "/Applications"),
-            homeURL.appendingPathComponent("Applications")
-        ]
+        let appDirs = self.appDirectories
         
-        // 1. Gather all app bundle URLs
-        var foundAppURLs: [URL] = []
-        for dir in appDirectories {
-            guard fileManager.fileExists(atPath: dir.path) else { continue }
-            if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-                for url in contents {
-                    if url.pathExtension.lowercased() == "app" {
-                        foundAppURLs.append(url)
-                    } else if url.hasDirectoryPath {
-                        // Check subdirectories (e.g. /Applications/Utilities)
-                        if let subContents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-                            for subURL in subContents where subURL.pathExtension.lowercased() == "app" {
-                                foundAppURLs.append(subURL)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // 1. Gather all app bundle URLs off MainActor
+        let foundAppURLs: [URL] = await Task.detached(priority: .userInitiated) {
+            Self.discoverAppBundleURLs(in: appDirs)
+        }.value
         
         let totalCount = max(1, foundAppURLs.count)
         statusMessage = "Analyzing \(foundAppURLs.count) applications and measuring bundle sizes..."
         
-        // 2. Parse app metadata and sizes concurrently
-        let parsedApps: [InstalledApp] = await withTaskGroup(of: InstalledApp?.self) { group in
-            for appURL in foundAppURLs {
-                group.addTask {
-                    let bundle = Bundle(url: appURL)
-                    let name = (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                        ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                        ?? appURL.deletingPathExtension().lastPathComponent
-                    let bundleId = bundle?.bundleIdentifier ?? ""
-                    let version = (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-                        ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
-                        ?? "1.0"
-                    
-                    let isSystem = appURL.path.hasPrefix("/System") ||
-                        (bundleId.hasPrefix("com.apple.") && !appURL.path.contains("/Users/"))
-                    
-                    let (size, _) = JunkScanEngine.calculateSizeFast(of: appURL)
-                    
-                    return InstalledApp(
-                        name: name,
-                        bundleIdentifier: bundleId,
-                        version: version,
-                        bundleURL: appURL,
-                        appSize: size,
-                        isSystemApp: isSystem,
-                        leftovers: []
-                    )
+        // 2. Parse app metadata and sizes concurrently off MainActor
+        let parsedApps: [InstalledApp] = await Task.detached(priority: .userInitiated) {
+            await withTaskGroup(of: InstalledApp?.self) { group in
+                for appURL in foundAppURLs {
+                    group.addTask {
+                        let bundle = Bundle(url: appURL)
+                        let name = (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                            ?? appURL.deletingPathExtension().lastPathComponent
+                        let bundleId = bundle?.bundleIdentifier ?? ""
+                        let version = (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
+                            ?? "1.0"
+                        
+                        let isSystem = appURL.path.hasPrefix("/System") ||
+                            (bundleId.hasPrefix("com.apple.") && !appURL.path.contains("/Users/"))
+                        
+                        let (size, _) = JunkScanEngine.calculateSizeFast(of: appURL)
+                        
+                        return InstalledApp(
+                            name: name,
+                            bundleIdentifier: bundleId,
+                            version: version,
+                            bundleURL: appURL,
+                            appSize: size,
+                            isSystemApp: isSystem,
+                            leftovers: []
+                        )
+                    }
                 }
-            }
-            
-            var collected: [InstalledApp] = []
-            for await item in group {
-                if let app = item {
-                    collected.append(app)
+                
+                var collected: [InstalledApp] = []
+                for await item in group {
+                    if let app = item {
+                        collected.append(app)
+                    }
                 }
+                return collected
             }
-            return collected
-        }
+        }.value
         
         // Update preliminary app list
-        self.installedApps = parsedApps.sorted { $0.totalSize > $1.totalSize }
-        if selectedAppId == nil, let first = self.installedApps.first(where: { !$0.isSystemApp }) {
-            selectedAppId = first.id
+        let sortedPreliminary = parsedApps.sorted { $0.totalSize > $1.totalSize }
+        let previousBundleURL = self.installedApps.first(where: { $0.id == self.selectedAppId })?.bundleURL
+        self.installedApps = sortedPreliminary
+        if let prevURL = previousBundleURL,
+           let matched = sortedPreliminary.first(where: { $0.bundleURL == prevURL }) {
+            self.selectedAppId = matched.id
+        } else if self.selectedAppId == nil || !sortedPreliminary.contains(where: { $0.id == self.selectedAppId }) {
+            self.selectedAppId = sortedPreliminary.first(where: { !$0.isSystemApp })?.id
         }
         
-        // 3. Scan leftovers for all installed applications
+        // 3. Scan leftovers for all installed applications (off MainActor)
         statusMessage = "Deep scanning leftover files across ~/Library directories..."
         isScanningLeftovers = true
         
         var appsWithLeftovers: [InstalledApp] = []
-        for (index, app) in self.installedApps.enumerated() {
+        for (index, app) in sortedPreliminary.enumerated() {
             let progress = Double(index) / Double(totalCount)
             self.scanProgress = progress
             self.statusMessage = "Scanning leftovers for \(app.name)..."
@@ -207,12 +228,13 @@ public class AppUninstallerScanner: ObservableObject {
             appsWithLeftovers.append(updatedApp)
         }
         
-        self.installedApps = appsWithLeftovers.sorted { $0.totalSize > $1.totalSize }
+        let sortedFinal = appsWithLeftovers.sorted { $0.totalSize > $1.totalSize }
+        self.installedApps = sortedFinal
         self.isScanningLeftovers = false
         
-        // 4. Scan for Orphaned Leftovers
+        // 4. Scan for Orphaned Leftovers (off MainActor)
         self.statusMessage = "Scanning for orphaned leftovers from uninstalled apps..."
-        let orphans = await self.scanOrphanedLeftovers(knownApps: self.installedApps)
+        let orphans = await self.scanOrphanedLeftovers(knownApps: sortedFinal)
         self.orphanedGroups = orphans.sorted { $0.totalSize > $1.totalSize }
         
         self.scanProgress = 1.0
@@ -222,18 +244,51 @@ public class AppUninstallerScanner: ObservableObject {
     
     // MARK: - Refresh Leftovers for Specific App
     public func refreshLeftovers(for app: InstalledApp) async {
+        guard !isScanningLeftovers && !isScanning && !isCleaning else { return }
+        isScanningLeftovers = true
         let leftovers = await findLeftovers(for: app)
         if let idx = installedApps.firstIndex(where: { $0.id == app.id }) {
             installedApps[idx].leftovers = leftovers
         }
+        isScanningLeftovers = false
+    }
+    
+    // MARK: - App Bundle Discovery (Off MainActor)
+    nonisolated private static func discoverAppBundleURLs(in appDirectories: [URL]) -> [URL] {
+        let fm = FileManager.default
+        var foundAppURLs: [URL] = []
+        for dir in appDirectories {
+            guard fm.fileExists(atPath: dir.path) else { continue }
+            if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for url in contents {
+                    if url.pathExtension.lowercased() == "app" {
+                        foundAppURLs.append(url)
+                    } else if url.hasDirectoryPath {
+                        // Check subdirectories (e.g. /Applications/Utilities)
+                        if let subContents = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                            for subURL in subContents where subURL.pathExtension.lowercased() == "app" {
+                                foundAppURLs.append(subURL)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return foundAppURLs
     }
     
     // MARK: - Leftover Finder Engine
-    private func findLeftovers(for app: InstalledApp) async -> [AppLeftoverItem] {
+    public func findLeftovers(for app: InstalledApp) async -> [AppLeftoverItem] {
+        let home = self.homeURL
+        return await Task.detached(priority: .userInitiated) {
+            Self.findLeftoversSync(for: app, home: home)
+        }.value
+    }
+    
+    nonisolated private static func findLeftoversSync(for app: InstalledApp, home: URL) -> [AppLeftoverItem] {
         let appName = app.name
         let bundleId = app.bundleIdentifier
-        let home = self.homeURL
-        let fm = self.fileManager
+        let fm = FileManager.default
         
         var items: [AppLeftoverItem] = []
         
@@ -358,7 +413,7 @@ public class AppUninstallerScanner: ObservableObject {
     }
     
     // MARK: - Matching Rules
-    private func matchesApp(
+    nonisolated public static func matchesApp(
         filename: String,
         fileURL: URL,
         appName: String,
@@ -398,10 +453,10 @@ public class AppUninstallerScanner: ObservableObject {
                 return true
             }
             
-            // Normalized alphanumeric check (e.g. "logioptionsplus" == "logioptions+", "claude3p" starts with "claude")
+            // Normalized alphanumeric check (e.g. "logioptionsplus" matches "Logi Options+", "claude3p" starts with "claude").
+            // Never test nAlpha.hasPrefix(fAlpha), which lets short vendor names like "Google" or "Go" match "Google Chrome".
             let fAlpha = fLower.filter { $0.isLetter || $0.isNumber }
-            let nAlpha = nLower.filter { $0.isLetter || $0.isNumber }
-            if nAlpha.count >= 4 && (fAlpha == nAlpha || fAlpha.hasPrefix(nAlpha) || nAlpha.hasPrefix(fAlpha)) {
+            if matchesNormalizedAlphanumeric(filenameAlpha: fAlpha, appNameLower: nLower) {
                 return true
             }
         }
@@ -415,8 +470,8 @@ public class AppUninstallerScanner: ObservableObject {
                 // Read plist content to check if it points to the app binary or bundle id
                 if let data = try? Data(contentsOf: fileURL),
                    let content = String(data: data, encoding: .utf8) {
-                    if !bLower.isEmpty && content.contains(bLower) { return true }
-                    if content.contains(appName) { return true }
+                    if !bLower.isEmpty && content.range(of: bLower, options: .caseInsensitive) != nil { return true }
+                    if !appName.isEmpty && content.contains(appName) { return true }
                 }
             }
         }
@@ -424,7 +479,12 @@ public class AppUninstallerScanner: ObservableObject {
         return false
     }
     
-    private func isGenericSystemWord(_ word: String) -> Bool {
+    nonisolated private static func matchesNormalizedAlphanumeric(filenameAlpha fAlpha: String, appNameLower: String) -> Bool {
+        let nAlpha = appNameLower.filter { $0.isLetter || $0.isNumber }
+        return fAlpha.count >= 5 && nAlpha.count >= 5 && (fAlpha == nAlpha || fAlpha.hasPrefix(nAlpha))
+    }
+    
+    nonisolated private static func isGenericSystemWord(_ word: String) -> Bool {
         let genericWords: Set<String> = [
             "apple", "system", "library", "mac", "macos", "data", "cache", "log", "logs",
             "file", "files", "support", "container", "containers", "state", "saved", "config"
@@ -433,9 +493,20 @@ public class AppUninstallerScanner: ObservableObject {
     }
     
     // MARK: - Orphaned Leftovers Scanner Engine
-    private func scanOrphanedLeftovers(knownApps: [InstalledApp]) async -> [OrphanedAppGroup] {
-        let fm = self.fileManager
+    public func scanOrphanedLeftovers(knownApps: [InstalledApp]) async -> [OrphanedAppGroup] {
         let home = self.homeURL
+        let systemAppDirs = self.systemAppDirectories
+        return await Task.detached(priority: .userInitiated) {
+            Self.scanOrphanedLeftoversSync(knownApps: knownApps, home: home, systemAppDirectories: systemAppDirs)
+        }.value
+    }
+    
+    nonisolated private static func scanOrphanedLeftoversSync(
+        knownApps: [InstalledApp],
+        home: URL,
+        systemAppDirectories: [URL]
+    ) -> [OrphanedAppGroup] {
+        let fm = FileManager.default
         
         // Build set of all installed bundle IDs and app names across all system locations
         var installedBids: Set<String> = []
@@ -452,9 +523,7 @@ public class AppUninstallerScanner: ObservableObject {
         }
         
         // Also add macOS System Applications to prevent false positives
-        let systemAppDirs = ["/System/Applications", "/System/Applications/Utilities", "/System/Cryptexes/App/System/Applications"]
-        for sDir in systemAppDirs {
-            let u = URL(fileURLWithPath: sDir)
+        for u in systemAppDirectories {
             if let files = try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 for f in files where f.pathExtension.lowercased() == "app" {
                     let b = Bundle(url: f)
@@ -504,7 +573,7 @@ public class AppUninstallerScanner: ObservableObject {
             }
         }
         
-        // Measure sizes concurrently and group by inferred app name
+        // Measure sizes and group by inferred app name (already off MainActor in Task.detached)
         var groupedItems: [String: [AppLeftoverItem]] = [:]
         
         for cand in orphanCandidates {
@@ -519,7 +588,7 @@ public class AppUninstallerScanner: ObservableObject {
                 url: cand.url,
                 size: size,
                 fileCount: count,
-                isSelected: true
+                isSelected: false
             )
             
             groupedItems[cand.groupKey, default: []].append(item)
@@ -536,7 +605,7 @@ public class AppUninstallerScanner: ObservableObject {
                 name: groupName,
                 bundleIdentifier: items.first(where: { $0.name.contains(".") })?.name,
                 items: items.sorted { $0.size > $1.size },
-                isSelected: true
+                isSelected: false
             )
             groups.append(group)
         }
@@ -544,7 +613,7 @@ public class AppUninstallerScanner: ObservableObject {
         return groups
     }
     
-    private func isAppleSystemResidual(filename: String) -> Bool {
+    nonisolated private static func isAppleSystemResidual(filename: String) -> Bool {
         let lower = filename.lowercased()
         if lower.hasPrefix("com.apple.") || lower.hasPrefix("apple") || lower.hasPrefix("byhost") {
             return true
@@ -574,7 +643,11 @@ public class AppUninstallerScanner: ObservableObject {
         return systemKeywords.contains(lower)
     }
     
-    private func belongsToInstalledApp(filename: String, installedBids: Set<String>, installedNames: Set<String>) -> Bool {
+    nonisolated public static func belongsToInstalledApp(
+        filename: String,
+        installedBids: Set<String>,
+        installedNames: Set<String>
+    ) -> Bool {
         let lower = filename.lowercased()
         
         for bid in installedBids {
@@ -589,13 +662,11 @@ public class AppUninstallerScanner: ObservableObject {
             }
         }
         
-        // Alphanumeric normalized check (e.g. logioptionsplus matches Logi Options+)
+        // Alphanumeric normalized check (e.g. logioptionsplus matches Logi Options+).
+        // Never test nAlpha.hasPrefix(fAlpha), which lets short vendor names like "Google" or "Go" match "Google Chrome".
         let fAlpha = lower.filter { $0.isLetter || $0.isNumber }
-        for name in installedNames {
-            let nAlpha = name.filter { $0.isLetter || $0.isNumber }
-            if nAlpha.count >= 4 && (fAlpha == nAlpha || fAlpha.hasPrefix(nAlpha) || nAlpha.hasPrefix(fAlpha)) {
-                return true
-            }
+        if fAlpha.count >= 5 && installedNames.contains(where: { matchesNormalizedAlphanumeric(filenameAlpha: fAlpha, appNameLower: $0) }) {
+            return true
         }
         
         // Also check if it's a known vendor folder that has installed software
@@ -612,7 +683,7 @@ public class AppUninstallerScanner: ObservableObject {
         return false
     }
     
-    private func inferAppGroupKey(from filename: String) -> String {
+    nonisolated private static func inferAppGroupKey(from filename: String) -> String {
         var clean = filename
         if clean.hasSuffix(".savedState") {
             clean = clean.replacingOccurrences(of: ".savedState", with: "")
@@ -636,20 +707,27 @@ public class AppUninstallerScanner: ObservableObject {
     
     // MARK: - Trash Selected App & Leftovers (Safe Trashing)
     public func trashApp(app: InstalledApp, trashBundle: Bool = true) async -> Bool {
+        await trashApp(app: app, trashBundle: trashBundle, trashHandler: nil)
+    }
+    
+    public func trashApp(
+        app: InstalledApp,
+        trashBundle: Bool = true,
+        trashHandler: (@Sendable (URL) throws -> Void)?
+    ) async -> Bool {
         guard !isCleaning else { return false }
         isCleaning = true
+        scanError = nil
         let isDryRun = DryRunManager.shared.isEnabled
         statusMessage = isDryRun ?
             "Simulating uninstallation of \(app.name)..." :
             "Safely moving \(app.name) and selected leftovers to macOS Trash..."
         
         let startTime = Date()
-        var reclaimedBytes: Int64 = 0
-        var reclaimedFiles: Int = 0
-        var errorsCount: Int = 0
-        let fm = self.fileManager
+        let home = self.homeURL
+        let logManager = self.deletionLogManager
         
-        // 1. Terminate running instance if open (skip if dry run)
+        // 1. Terminate running instance if open (skip if dry run; AppKit must run on MainActor)
         if !isDryRun && !app.bundleIdentifier.isEmpty {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier)
             for rApp in runningApps {
@@ -657,150 +735,348 @@ public class AppUninstallerScanner: ObservableObject {
             }
         }
         
-        // 2. Trash Selected Leftover Files
-        for item in app.leftovers where item.isSelected {
-            if let protErr = PathProtection.evaluatePath(url: item.url) {
-                print("Skipping protected leftover: \(item.url.path) - \(protErr.localizedDescription)")
-                errorsCount += 1
-                continue
+        // 2 & 3. Trash leftovers and app bundle off MainActor
+        let outcome = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let performTrash: @Sendable (URL) throws -> Void = trashHandler ?? { url in
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
             }
             
-            if isDryRun {
-                DryRunManager.shared.logSimulation(action: "Trash Leftover", target: item.url.path)
-                reclaimedBytes += item.size
-                reclaimedFiles += max(1, item.fileCount)
-            } else {
-                do {
-                    if fm.fileExists(atPath: item.url.path) {
-                        try fm.trashItem(at: item.url, resultingItemURL: nil)
-                        reclaimedBytes += item.size
-                        reclaimedFiles += max(1, item.fileCount)
-                    }
-                } catch {
-                    print("Error moving leftover to Trash: \(item.url.path) - \(error.localizedDescription)")
+            var reclaimedBytes: Int64 = 0
+            var reclaimedFiles: Int = 0
+            var errorsCount: Int = 0
+            var remainingLeftovers: [AppLeftoverItem] = []
+            var dryRunTargets: [(action: String, path: String)] = []
+            var firstLeftoverError: String? = nil
+            
+            // Trash Selected Leftover Files
+            for item in app.leftovers {
+                guard item.isSelected else {
+                    remainingLeftovers.append(item)
+                    continue
+                }
+                
+                if let protErr = PathProtection.evaluatePath(url: item.url, homeDirectory: home) {
+                    AppLogger.security.warning("Skipping protected leftover: \(item.url.path) - \(protErr.localizedDescription)")
+                    logManager.log(
+                        sourceModule: "App Uninstaller",
+                        path: item.url.path,
+                        sizeBytes: item.size,
+                        destination: .trash,
+                        isSuccess: false,
+                        errorMessage: protErr.localizedDescription
+                    )
                     errorsCount += 1
+                    if firstLeftoverError == nil { firstLeftoverError = protErr.localizedDescription }
+                    remainingLeftovers.append(item)
+                    continue
+                }
+                
+                if isDryRun {
+                    dryRunTargets.append(("Trash Leftover", item.url.path))
+                    logManager.log(
+                        sourceModule: "App Uninstaller",
+                        path: item.url.path,
+                        sizeBytes: item.size,
+                        destination: .simulated,
+                        isSuccess: true
+                    )
+                    reclaimedBytes += item.size
+                    reclaimedFiles += max(1, item.fileCount)
+                } else {
+                    do {
+                        if fm.fileExists(atPath: item.url.path) {
+                            try performTrash(item.url)
+                            logManager.log(
+                                sourceModule: "App Uninstaller",
+                                path: item.url.path,
+                                sizeBytes: item.size,
+                                destination: .trash,
+                                isSuccess: true
+                            )
+                            reclaimedBytes += item.size
+                            reclaimedFiles += max(1, item.fileCount)
+                        }
+                    } catch {
+                        AppLogger.cleanup.error("Error moving leftover to Trash: \(item.url.path) - \(error.localizedDescription)")
+                        logManager.log(
+                            sourceModule: "App Uninstaller",
+                            path: item.url.path,
+                            sizeBytes: item.size,
+                            destination: .trash,
+                            isSuccess: false,
+                            errorMessage: error.localizedDescription
+                        )
+                        errorsCount += 1
+                        if firstLeftoverError == nil { firstLeftoverError = error.localizedDescription }
+                        remainingLeftovers.append(item)
+                    }
                 }
             }
-        }
+            
+            // Trash Application Bundle
+            var bundleTrashSucceeded = false
+            var bundleErrorMessage: String? = nil
+            
+            if trashBundle {
+                if app.isSystemApp {
+                    errorsCount += 1
+                    let msg = "System application \(app.name) is protected and cannot be uninstalled."
+                    bundleErrorMessage = msg
+                    logManager.log(
+                        sourceModule: "App Uninstaller",
+                        path: app.bundleURL.path,
+                        sizeBytes: app.appSize,
+                        destination: .trash,
+                        isSuccess: false,
+                        errorMessage: msg
+                    )
+                } else if let protErr = PathProtection.evaluatePath(url: app.bundleURL, homeDirectory: home) {
+                    AppLogger.security.warning("Cannot delete protected application: \(app.bundleURL.path) - \(protErr.localizedDescription)")
+                    logManager.log(
+                        sourceModule: "App Uninstaller",
+                        path: app.bundleURL.path,
+                        sizeBytes: app.appSize,
+                        destination: .trash,
+                        isSuccess: false,
+                        errorMessage: protErr.localizedDescription
+                    )
+                    errorsCount += 1
+                    bundleErrorMessage = protErr.localizedDescription
+                } else if isDryRun {
+                    dryRunTargets.append(("Trash App Bundle", app.bundleURL.path))
+                    logManager.log(
+                        sourceModule: "App Uninstaller",
+                        path: app.bundleURL.path,
+                        sizeBytes: app.appSize,
+                        destination: .simulated,
+                        isSuccess: true
+                    )
+                    reclaimedBytes += app.appSize
+                    reclaimedFiles += 1
+                    bundleTrashSucceeded = true
+                } else {
+                    do {
+                        if fm.fileExists(atPath: app.bundleURL.path) {
+                            try performTrash(app.bundleURL)
+                            logManager.log(
+                                sourceModule: "App Uninstaller",
+                                path: app.bundleURL.path,
+                                sizeBytes: app.appSize,
+                                destination: .trash,
+                                isSuccess: true
+                            )
+                            reclaimedBytes += app.appSize
+                            reclaimedFiles += 1
+                        }
+                        bundleTrashSucceeded = true
+                    } catch {
+                        AppLogger.cleanup.error("Error moving app bundle to Trash: \(app.bundleURL.path) - \(error.localizedDescription)")
+                        logManager.log(
+                            sourceModule: "App Uninstaller",
+                            path: app.bundleURL.path,
+                            sizeBytes: app.appSize,
+                            destination: .trash,
+                            isSuccess: false,
+                            errorMessage: error.localizedDescription
+                        )
+                        errorsCount += 1
+                        bundleErrorMessage = error.localizedDescription
+                    }
+                }
+            }
+            
+            return (
+                reclaimedBytes: reclaimedBytes,
+                reclaimedFiles: reclaimedFiles,
+                errorsCount: errorsCount,
+                remainingLeftovers: remainingLeftovers,
+                dryRunTargets: dryRunTargets,
+                bundleTrashSucceeded: bundleTrashSucceeded,
+                bundleErrorMessage: bundleErrorMessage,
+                firstLeftoverError: firstLeftoverError
+            )
+        }.value
         
-        // 3. Trash Application Bundle
-        if trashBundle && !app.isSystemApp {
-            if let protErr = PathProtection.evaluatePath(url: app.bundleURL) {
-                print("Cannot delete protected application: \(app.bundleURL.path) - \(protErr.localizedDescription)")
-                errorsCount += 1
-            } else if isDryRun {
-                DryRunManager.shared.logSimulation(action: "Trash App Bundle", target: app.bundleURL.path)
-                reclaimedBytes += app.appSize
-                reclaimedFiles += 1
-            } else {
-                do {
-                    if fm.fileExists(atPath: app.bundleURL.path) {
-                        try fm.trashItem(at: app.bundleURL, resultingItemURL: nil)
-                        reclaimedBytes += app.appSize
-                        reclaimedFiles += 1
-                    }
-                } catch {
-                    print("Error moving app bundle to Trash: \(app.bundleURL.path) - \(error.localizedDescription)")
-                    errorsCount += 1
-                }
-            }
+        for target in outcome.dryRunTargets {
+            DryRunManager.shared.logSimulation(action: target.action, target: target.path)
         }
         
         let elapsed = Date().timeIntervalSince(startTime)
         let result = CleanResult(
-            reclaimedBytes: reclaimedBytes,
-            reclaimedFilesCount: reclaimedFiles,
-            errorsCount: errorsCount,
+            reclaimedBytes: outcome.reclaimedBytes,
+            reclaimedFilesCount: outcome.reclaimedFiles,
+            errorsCount: outcome.errorsCount,
             duration: elapsed,
             cleanedCategorySizes: [:],
             isDryRun: isDryRun
         )
         
-        // Remove app from local list
-        self.installedApps.removeAll { $0.id == app.id }
-        if self.selectedAppId == app.id {
-            self.selectedAppId = self.filteredApps.first?.id
+        let shouldRemoveApp = trashBundle && (outcome.bundleTrashSucceeded || (isDryRun && !app.isSystemApp && outcome.bundleErrorMessage == nil))
+        
+        if shouldRemoveApp {
+            self.installedApps.removeAll { $0.id == app.id }
+            if self.selectedAppId == app.id {
+                self.selectedAppId = self.filteredApps.first?.id
+            }
+        } else if let idx = self.installedApps.firstIndex(where: { $0.id == app.id }) {
+            self.installedApps[idx].leftovers = outcome.remainingLeftovers
+        }
+        
+        if let bundleErr = outcome.bundleErrorMessage {
+            self.scanError = "Could not move \(app.name) to Trash: \(bundleErr)"
+        } else if outcome.errorsCount > 0 {
+            self.scanError = outcome.firstLeftoverError ?? "Could not move \(outcome.errorsCount) leftover item(s) to Trash."
         }
         
         self.lastCleanResult = result
         self.isCleaning = false
-        self.showCelebration = true
-        self.statusMessage = isDryRun ?
-            "Dry-Run: Simulated uninstallation of \(app.name) (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
-            "Uninstalled \(app.name). Reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) moved to macOS Trash."
+        self.showCelebration = outcome.errorsCount == 0 && outcome.reclaimedFiles > 0 && (!trashBundle || shouldRemoveApp)
+        
+        if let bundleErr = outcome.bundleErrorMessage {
+            self.statusMessage = "Failed to uninstall \(app.name): \(bundleErr)"
+        } else if isDryRun {
+            self.statusMessage = "Dry-Run: Simulated uninstallation of \(app.name) (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)))."
+        } else if trashBundle {
+            self.statusMessage = "Uninstalled \(app.name). Reclaimed \(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)) moved to macOS Trash."
+        } else {
+            self.statusMessage = "Cleaned selected leftovers for \(app.name) (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)))."
+        }
         
         // Refresh StorageModel
         StorageModel.shared.refresh()
-        return errorsCount == 0
+        return outcome.errorsCount == 0
     }
     
     // MARK: - Trash Selected Orphaned Groups
     public func trashSelectedOrphans() async -> Bool {
+        await trashSelectedOrphans(trashHandler: nil)
+    }
+    
+    public func trashSelectedOrphans(trashHandler: (@Sendable (URL) throws -> Void)?) async -> Bool {
         guard !isCleaning else { return false }
         isCleaning = true
+        scanError = nil
         let isDryRun = DryRunManager.shared.isEnabled
         statusMessage = isDryRun ?
             "Simulating orphaned leftover removal (Dry-Run mode)..." :
             "Safely moving selected orphaned leftover files to macOS Trash..."
         
         let startTime = Date()
-        var reclaimedBytes: Int64 = 0
-        var reclaimedFiles: Int = 0
-        var errorsCount: Int = 0
-        let fm = self.fileManager
+        let groupsSnapshot = self.orphanedGroups
+        let home = self.homeURL
+        let logManager = self.deletionLogManager
         
-        var remainingGroups: [OrphanedAppGroup] = []
-        
-        for var group in orphanedGroups {
-            if group.isSelected {
+        let outcome = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let performTrash: @Sendable (URL) throws -> Void = trashHandler ?? { url in
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            }
+            
+            var reclaimedBytes: Int64 = 0
+            var reclaimedFiles: Int = 0
+            var errorsCount: Int = 0
+            var remainingGroups: [OrphanedAppGroup] = []
+            var dryRunTargets: [String] = []
+            var firstErrorMessage: String? = nil
+            
+            for var group in groupsSnapshot {
                 var remainingItems: [AppLeftoverItem] = []
                 for item in group.items {
-                    if item.isSelected {
-                        if let protErr = PathProtection.evaluatePath(url: item.url) {
-                            print("Skipping protected orphan: \(item.url.path) - \(protErr.localizedDescription)")
-                            errorsCount += 1
-                            remainingItems.append(item)
-                            continue
-                        }
-                        
-                        if isDryRun {
-                            DryRunManager.shared.logSimulation(action: "Trash Orphaned Item", target: item.url.path)
-                            reclaimedBytes += item.size
-                            reclaimedFiles += max(1, item.fileCount)
-                        } else {
-                            do {
-                                if fm.fileExists(atPath: item.url.path) {
-                                    try fm.trashItem(at: item.url, resultingItemURL: nil)
-                                    reclaimedBytes += item.size
-                                    reclaimedFiles += max(1, item.fileCount)
-                                }
-                            } catch {
-                                print("Error moving orphan to Trash: \(item.url.path) - \(error.localizedDescription)")
-                                errorsCount += 1
-                                remainingItems.append(item)
-                            }
-                        }
-                    } else {
+                    guard item.isSelected else {
                         remainingItems.append(item)
+                        continue
+                    }
+                    
+                    if let protErr = PathProtection.evaluatePath(url: item.url, homeDirectory: home) {
+                        AppLogger.security.warning("Skipping protected orphan: \(item.url.path) - \(protErr.localizedDescription)")
+                        logManager.log(
+                            sourceModule: "App Uninstaller",
+                            path: item.url.path,
+                            sizeBytes: item.size,
+                            destination: .trash,
+                            isSuccess: false,
+                            errorMessage: protErr.localizedDescription
+                        )
+                        errorsCount += 1
+                        if firstErrorMessage == nil { firstErrorMessage = protErr.localizedDescription }
+                        remainingItems.append(item)
+                        continue
+                    }
+                    
+                    if isDryRun {
+                        dryRunTargets.append(item.url.path)
+                        logManager.log(
+                            sourceModule: "App Uninstaller",
+                            path: item.url.path,
+                            sizeBytes: item.size,
+                            destination: .simulated,
+                            isSuccess: true
+                        )
+                        reclaimedBytes += item.size
+                        reclaimedFiles += max(1, item.fileCount)
+                    } else {
+                        do {
+                            if fm.fileExists(atPath: item.url.path) {
+                                try performTrash(item.url)
+                                logManager.log(
+                                    sourceModule: "App Uninstaller",
+                                    path: item.url.path,
+                                    sizeBytes: item.size,
+                                    destination: .trash,
+                                    isSuccess: true
+                                )
+                                reclaimedBytes += item.size
+                                reclaimedFiles += max(1, item.fileCount)
+                            }
+                        } catch {
+                            AppLogger.cleanup.error("Error moving orphan to Trash: \(item.url.path) - \(error.localizedDescription)")
+                            logManager.log(
+                                sourceModule: "App Uninstaller",
+                                path: item.url.path,
+                                sizeBytes: item.size,
+                                destination: .trash,
+                                isSuccess: false,
+                                errorMessage: error.localizedDescription
+                            )
+                            errorsCount += 1
+                            if firstErrorMessage == nil { firstErrorMessage = error.localizedDescription }
+                            remainingItems.append(item)
+                        }
                     }
                 }
                 
                 if !remainingItems.isEmpty {
                     group.items = remainingItems
+                    group.isSelected = remainingItems.allSatisfy { $0.isSelected }
                     remainingGroups.append(group)
                 }
-            } else {
-                remainingGroups.append(group)
             }
+            
+            return (
+                reclaimedBytes: reclaimedBytes,
+                reclaimedFiles: reclaimedFiles,
+                errorsCount: errorsCount,
+                remainingGroups: remainingGroups,
+                dryRunTargets: dryRunTargets,
+                firstErrorMessage: firstErrorMessage
+            )
+        }.value
+        
+        for target in outcome.dryRunTargets {
+            DryRunManager.shared.logSimulation(action: "Trash Orphaned Item", target: target)
         }
         
-        self.orphanedGroups = remainingGroups
+        self.orphanedGroups = outcome.remainingGroups
+        if outcome.errorsCount > 0 {
+            self.scanError = outcome.firstErrorMessage ?? "Could not move \(outcome.errorsCount) orphaned item(s) to Trash."
+        }
         
         let elapsed = Date().timeIntervalSince(startTime)
         let result = CleanResult(
-            reclaimedBytes: reclaimedBytes,
-            reclaimedFilesCount: reclaimedFiles,
-            errorsCount: errorsCount,
+            reclaimedBytes: outcome.reclaimedBytes,
+            reclaimedFilesCount: outcome.reclaimedFiles,
+            errorsCount: outcome.errorsCount,
             duration: elapsed,
             cleanedCategorySizes: [:],
             isDryRun: isDryRun
@@ -808,12 +1084,12 @@ public class AppUninstallerScanner: ObservableObject {
         
         self.lastCleanResult = result
         self.isCleaning = false
-        self.showCelebration = true
+        self.showCelebration = outcome.errorsCount == 0 && outcome.reclaimedFiles > 0
         self.statusMessage = isDryRun ?
-            "Dry-Run: Simulated \(reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)))." :
-            "Successfully moved \(reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file))) to Trash."
+            "Dry-Run: Simulated \(outcome.reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)))." :
+            "Successfully moved \(outcome.reclaimedFiles) orphaned files (\(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file))) to Trash."
         
         StorageModel.shared.refresh()
-        return errorsCount == 0
+        return outcome.errorsCount == 0
     }
 }

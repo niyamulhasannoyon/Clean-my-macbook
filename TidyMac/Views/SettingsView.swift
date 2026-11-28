@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct SettingsView: View {
     @ObservedObject var dryRun = DryRunManager.shared

@@ -24,19 +24,40 @@ public final class DryRunManager: ObservableObject {
     }
     
     public func toggle() {
-        isEnabled.toggle()
+        let performToggle = {
+            self.isEnabled.toggle()
+        }
+        if Thread.isMainThread {
+            performToggle()
+        } else {
+            DispatchQueue.main.async(execute: performToggle)
+        }
     }
     
     public func logSimulation(action: String, target: String) {
         let entry = "[DRY-RUN SIMULATION] \(action): \(target)"
         print(entry)
-        simulatedActionsLog.append(entry)
-        if simulatedActionsLog.count > 100 {
-            simulatedActionsLog.removeFirst()
+        let appendEntry = {
+            self.simulatedActionsLog.append(entry)
+            if self.simulatedActionsLog.count > 100 {
+                self.simulatedActionsLog.removeFirst(self.simulatedActionsLog.count - 100)
+            }
+        }
+        if Thread.isMainThread {
+            appendEntry()
+        } else {
+            DispatchQueue.main.async(execute: appendEntry)
         }
     }
     
     public func clearLog() {
-        simulatedActionsLog.removeAll()
+        let clear = {
+            self.simulatedActionsLog.removeAll()
+        }
+        if Thread.isMainThread {
+            clear()
+        } else {
+            DispatchQueue.main.async(execute: clear)
+        }
     }
 }

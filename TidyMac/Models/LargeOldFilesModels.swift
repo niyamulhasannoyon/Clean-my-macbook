@@ -89,6 +89,13 @@ public struct LargeOldFileItem: Identifiable, Hashable {
         self.isSelected = isSelected
     }
     
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+    
     public var formattedSize: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
@@ -98,7 +105,7 @@ public struct LargeOldFileItem: Identifiable, Hashable {
     }
     
     public var ageInDays: Int {
-        Calendar.current.dateComponents([.day], from: modificationDate, to: Date()).day ?? 0
+        max(0, Calendar.current.dateComponents([.day], from: modificationDate, to: Date()).day ?? 0)
     }
     
     public var isOld: Bool {
@@ -106,10 +113,7 @@ public struct LargeOldFileItem: Identifiable, Hashable {
     }
     
     public var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter.string(from: modificationDate)
+        Self.dateFormatter.string(from: modificationDate)
     }
     
     public var formattedAge: String {

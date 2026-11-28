@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 /// A reusable, modern banner component displayed inside scan views when Full Disk Access is not granted.
 /// Explains why the scan feature is disabled and provides quick actions to open System Settings or the guide.

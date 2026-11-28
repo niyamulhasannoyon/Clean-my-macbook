@@ -36,6 +36,22 @@ public enum JunkScanEngine {
         return (res.bytes, res.filesCount)
     }
     
+    /// Folder names under ~/Library/Caches owned by browser or Xcode scanners to prevent double-counting.
+    public static let excludedUserCacheDirectories: Set<String> = [
+        "com.apple.Safari",
+        "Google",
+        "Firefox",
+        "Mozilla",
+        "Microsoft Edge",
+        "BraveSoftware",
+        "company.thebrowser.Browser",
+        "com.apple.dt.Xcode"
+    ]
+    
+    private static let excludedUserCacheDirectoriesLowercased: Set<String> = Set(
+        excludedUserCacheDirectories.map { $0.lowercased() }
+    )
+    
     // MARK: 1. User Caches
     public static func scanUserAppCaches(home: URL, fm: FileManager) async -> [JunkItem] {
         let cachesURL = home.appendingPathComponent("Library/Caches")
@@ -49,6 +65,9 @@ public enum JunkScanEngine {
         
         return await withTaskGroup(of: JunkItem?.self) { group in
             for subURL in subdirs {
+                if excludedUserCacheDirectoriesLowercased.contains(subURL.lastPathComponent.lowercased()) {
+                    continue
+                }
                 group.addTask {
                     let (size, count) = calculateSizeFast(of: subURL, fm: fm)
                     guard size > 100 * 1024 else { return nil } // Filter out negligible items (< 100KB)
@@ -78,46 +97,56 @@ public enum JunkScanEngine {
     }
     
     // MARK: 2. Logs
-    public static func scanLogs(home: URL, fm: FileManager) async -> [JunkItem] {
-        var items: [JunkItem] = []
+    public static func scanLogs(
+        home: URL,
+        fm: FileManager,
+        systemLogsURL: URL = URL(fileURLWithPath: "/Library/Logs")
+    ) async -> [JunkItem] {
+        let logRoots: [(url: URL, isSystem: Bool, icon: String)] = [
+            (home.appendingPathComponent("Library/Logs"), false, "doc.text.magnifyingglass"),
+            (systemLogsURL, true, "gearshape.2.fill")
+        ]
         
-        // User Logs
-        let userLogsURL = home.appendingPathComponent("Library/Logs")
-        if fm.fileExists(atPath: userLogsURL.path) {
-            let (size, count) = calculateSizeFast(of: userLogsURL, fm: fm)
-            if size > 0 {
-                items.append(JunkItem(
-                    category: .systemLogs,
-                    name: "User Diagnostic Logs",
-                    path: userLogsURL,
-                    size: size,
-                    fileCount: count,
-                    isSelected: true,
-                    details: "~/Library/Logs",
-                    icon: "doc.text.magnifyingglass"
-                ))
+        return await withTaskGroup(of: JunkItem?.self) { group in
+            for root in logRoots {
+                guard fm.fileExists(atPath: root.url.path) else { continue }
+                guard let entries = try? fm.contentsOfDirectory(
+                    at: root.url,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                
+                for entryURL in entries {
+                    group.addTask {
+                        let (size, count) = calculateSizeFast(of: entryURL, fm: fm)
+                        guard size > 0 else { return nil }
+                        
+                        let displayPath = root.isSystem
+                            ? entryURL.path
+                            : entryURL.path.replacingOccurrences(of: home.path, with: "~")
+                        
+                        return JunkItem(
+                            category: .systemLogs,
+                            name: entryURL.lastPathComponent,
+                            path: entryURL,
+                            size: size,
+                            fileCount: count,
+                            isSelected: true,
+                            details: displayPath,
+                            icon: root.icon
+                        )
+                    }
+                }
             }
-        }
-        
-        // System Logs
-        let systemLogsURL = URL(fileURLWithPath: "/Library/Logs")
-        if fm.fileExists(atPath: systemLogsURL.path) {
-            let (size, count) = calculateSizeFast(of: systemLogsURL, fm: fm)
-            if size > 0 {
-                items.append(JunkItem(
-                    category: .systemLogs,
-                    name: "System Daemon & Diagnostic Logs",
-                    path: systemLogsURL,
-                    size: size,
-                    fileCount: count,
-                    isSelected: true,
-                    details: "/Library/Logs",
-                    icon: "gearshape.2.fill"
-                ))
+            
+            var items: [JunkItem] = []
+            for await item in group {
+                if let item = item {
+                    items.append(item)
+                }
             }
+            return items.sorted { $0.size > $1.size }
         }
-        
-        return items
     }
     
     // MARK: 3. Xcode & Developer
@@ -163,84 +192,37 @@ public enum JunkScanEngine {
     
     // MARK: 4. Browser Caches
     public static func scanBrowserCaches(home: URL, fm: FileManager) async -> [JunkItem] {
-        let browserConfigs: [(name: String, paths: [URL], icon: String)] = [
-            (
-                "Safari Cache",
-                [
-                    home.appendingPathComponent("Library/Containers/com.apple.Safari/Data/Library/Caches"),
-                    home.appendingPathComponent("Library/Caches/com.apple.Safari")
-                ],
-                "safari.fill"
-            ),
-            (
-                "Google Chrome Cache",
-                [
-                    home.appendingPathComponent("Library/Caches/Google/Chrome"),
-                    home.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Cache"),
-                    home.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Code Cache")
-                ],
-                "globe"
-            ),
-            (
-                "Mozilla Firefox Cache",
-                [
-                    home.appendingPathComponent("Library/Caches/Firefox"),
-                    home.appendingPathComponent("Library/Caches/Mozilla/Firefox")
-                ],
-                "flame.fill"
-            ),
-            (
-                "Microsoft Edge Cache",
-                [
-                    home.appendingPathComponent("Library/Caches/Microsoft Edge"),
-                    home.appendingPathComponent("Library/Application Support/Microsoft Edge/Default/Cache")
-                ],
-                "globe.europe.africa.fill"
-            ),
-            (
-                "Brave Browser Cache",
-                [
-                    home.appendingPathComponent("Library/Caches/BraveSoftware/Brave-Browser"),
-                    home.appendingPathComponent("Library/Application Support/BraveSoftware/Brave-Browser/Default/Cache")
-                ],
-                "shield.fill"
-            ),
-            (
-                "Arc Browser Cache",
-                [
-                    home.appendingPathComponent("Library/Caches/company.thebrowser.Browser")
-                ],
-                "circle.grid.2x2.fill"
-            )
+        let browserTargets: [(name: String, path: URL, icon: String)] = [
+            ("Safari Container Cache", home.appendingPathComponent("Library/Containers/com.apple.Safari/Data/Library/Caches"), "safari.fill"),
+            ("Safari Cache", home.appendingPathComponent("Library/Caches/com.apple.Safari"), "safari.fill"),
+            ("Google Chrome Cache", home.appendingPathComponent("Library/Caches/Google/Chrome"), "globe"),
+            ("Google Chrome Profile Cache", home.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Cache"), "globe"),
+            ("Google Chrome Code Cache", home.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Code Cache"), "globe"),
+            ("Mozilla Firefox Cache", home.appendingPathComponent("Library/Caches/Firefox"), "flame.fill"),
+            ("Mozilla Firefox Legacy Cache", home.appendingPathComponent("Library/Caches/Mozilla/Firefox"), "flame.fill"),
+            ("Microsoft Edge Cache", home.appendingPathComponent("Library/Caches/Microsoft Edge"), "globe.europe.africa.fill"),
+            ("Microsoft Edge Profile Cache", home.appendingPathComponent("Library/Application Support/Microsoft Edge/Default/Cache"), "globe.europe.africa.fill"),
+            ("Brave Browser Cache", home.appendingPathComponent("Library/Caches/BraveSoftware/Brave-Browser"), "shield.fill"),
+            ("Brave Browser Profile Cache", home.appendingPathComponent("Library/Application Support/BraveSoftware/Brave-Browser/Default/Cache"), "shield.fill"),
+            ("Arc Browser Cache", home.appendingPathComponent("Library/Caches/company.thebrowser.Browser"), "circle.grid.2x2.fill")
         ]
         
         return await withTaskGroup(of: JunkItem?.self) { group in
-            for browser in browserConfigs {
+            for target in browserTargets {
                 group.addTask {
-                    var totalSize: Int64 = 0
-                    var totalCount: Int = 0
-                    var validPath: URL? = nil
-                    
-                    for path in browser.paths {
-                        if fm.fileExists(atPath: path.path) {
-                            validPath = validPath ?? path
-                            let (size, count) = calculateSizeFast(of: path, fm: fm)
-                            totalSize += size
-                            totalCount += count
-                        }
-                    }
-                    
-                    guard let primaryPath = validPath, totalSize > 10 * 1024 else { return nil }
+                    guard fm.fileExists(atPath: target.path.path) else { return nil }
+                    let (size, count) = calculateSizeFast(of: target.path, fm: fm)
+                    guard size > 10 * 1024 else { return nil }
                     
                     return JunkItem(
                         category: .browserCaches,
-                        name: browser.name,
-                        path: primaryPath,
-                        size: totalSize,
-                        fileCount: totalCount,
+                        name: target.name,
+                        path: target.path,
+                        size: size,
+                        fileCount: count,
                         isSelected: true,
-                        details: "Web cache, offline scripts, stylesheets, and temporary assets",
-                        icon: browser.icon
+                        details: target.path.path.replacingOccurrences(of: home.path, with: "~"),
+                        icon: target.icon
                     )
                 }
             }
@@ -366,57 +348,6 @@ public enum JunkScanEngine {
         return items
     }
     
-    // MARK: 8. Unused Languages (.lproj) - Optional
-    public static func scanUnusedLanguages(fm: FileManager) async -> [JunkItem] {
-        let preferred = Set(Locale.preferredLanguages.map { String($0.prefix(2)).lowercased() } + ["en", "base"])
-        let appDirs = [
-            URL(fileURLWithPath: "/Applications"),
-            fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
-        ]
-        
-        var foundItems: [JunkItem] = []
-        
-        for dir in appDirs {
-            guard let apps = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-                continue
-            }
-            
-            for app in apps where app.pathExtension == "app" {
-                let resURL = app.appendingPathComponent("Contents/Resources")
-                guard let resources = try? fm.contentsOfDirectory(at: resURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-                    continue
-                }
-                
-                var appUnusedSize: Int64 = 0
-                var appUnusedCount: Int = 0
-                
-                for item in resources where item.pathExtension == "lproj" {
-                    let langName = item.deletingPathExtension().lastPathComponent.lowercased()
-                    let langCode = String(langName.prefix(2))
-                    if !preferred.contains(langCode) && !preferred.contains(langName) {
-                        let (size, count) = calculateSizeFast(of: item, fm: fm)
-                        appUnusedSize += size
-                        appUnusedCount += count
-                    }
-                }
-                
-                if appUnusedSize > 500 * 1024 { // Only report apps with > 500KB language junk
-                    foundItems.append(JunkItem(
-                        category: .unusedLanguages,
-                        name: "\(app.deletingPathExtension().lastPathComponent) Language Bundles",
-                        path: resURL,
-                        size: appUnusedSize,
-                        fileCount: appUnusedCount,
-                        isSelected: false, // Optional safety default
-                        details: "\(appUnusedCount) unused localization files (.lproj)",
-                        icon: "character.book.closed"
-                    ))
-                }
-            }
-        }
-        
-        return foundItems.sorted { $0.size > $1.size }
-    }
 }
 
 // MARK: - Main Actor System Junk Scanner Model
@@ -431,7 +362,6 @@ public class SystemJunkScanner: ObservableObject {
     @Published public var currentScanningStep: String = ""
     @Published public var lastCleanResult: CleanResult? = nil
     @Published public var showReclaimedAnimation: Bool = false
-    @Published public var includeUnusedLanguages: Bool = false
     @Published public var scanError: String? = nil
     
     // Overall Stats
@@ -464,16 +394,16 @@ public class SystemJunkScanner: ObservableObject {
         return categories.allSatisfy { $0.isSelected }
     }
     
-    public init() {
+    private let deletionLogManager: DeletionLogManager
+    
+    public init(deletionLogManager: DeletionLogManager = .shared) {
+        self.deletionLogManager = deletionLogManager
         resetCategories()
     }
     
     public func resetCategories() {
-        self.categories = JunkCategoryType.allCases.compactMap { type in
-            if type == .unusedLanguages && !includeUnusedLanguages {
-                return nil
-            }
-            return JunkCategory(id: type, items: [], isExpanded: false, isScanning: false)
+        self.categories = JunkCategoryType.allCases.map {
+            JunkCategory(id: $0, items: [], isExpanded: false, isScanning: false)
         }
     }
     
@@ -488,7 +418,7 @@ public class SystemJunkScanner: ObservableObject {
     // MARK: - Fast Concurrent Scan
     
     public func startScan() async {
-        guard !isScanning else { return }
+        guard !isScanning && !isCleaning else { return }
         isScanning = true
         scanProgress = 0.0
         currentScanningStep = "Preparing System Junk scan..."
@@ -499,11 +429,7 @@ public class SystemJunkScanner: ObservableObject {
         let startTime = Date()
         resetCategories()
         
-        var targetCategories = JunkCategoryType.allCases
-        if !includeUnusedLanguages {
-            targetCategories.removeAll(where: { $0 == .unusedLanguages })
-        }
-        
+        let targetCategories = JunkCategoryType.allCases
         let totalSteps = Double(targetCategories.count)
         var completedSteps: Double = 0.0
         
@@ -559,8 +485,6 @@ public class SystemJunkScanner: ObservableObject {
                 return await JunkScanEngine.scanTrash(home: home, fm: fm)
             case .iosBackups:
                 return await JunkScanEngine.scanIOSBackups(home: home, fm: fm)
-            case .unusedLanguages:
-                return await JunkScanEngine.scanUnusedLanguages(fm: fm)
             }
         }.value
     }
@@ -568,79 +492,150 @@ public class SystemJunkScanner: ObservableObject {
     // MARK: - Clean Action (Send to Trash)
     
     public func performClean() async {
-        guard !isCleaning else { return }
+        await performClean(trashHandler: nil)
+    }
+    
+    public func performClean(trashHandler: (@Sendable (URL) throws -> Void)?) async {
+        guard !isCleaning && !isScanning else { return }
         isCleaning = true
         let isDryRun = DryRunManager.shared.isEnabled
         currentScanningStep = isDryRun ? "Simulating junk cleanup (Dry-Run mode)..." : "Moving selected junk to macOS Trash..."
         
         let startTime = Date()
-        var reclaimedBytes: Int64 = 0
-        var reclaimedFiles: Int = 0
-        var errorsCount: Int = 0
-        var categoryReclaimed: [JunkCategoryType: Int64] = [:]
+        let categoriesSnapshot = self.categories
+        let logManager = self.deletionLogManager
         
-        let fm = FileManager.default
-        let homeTrashPath = fm.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").path
-        
-        for catIdx in categories.indices {
-            let categoryType = categories[catIdx].id
-            var catReclaimedForType: Int64 = 0
+        let outcome = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let homeTrashURL = fm.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")
+            let rawTrashPath = homeTrashURL.standardizedFileURL.path
+            let standardizedHomeTrashPath = PathProtection.standardizedPath(of: homeTrashURL)
             
-            var remainingItems: [JunkItem] = []
+            var reclaimedBytes: Int64 = 0
+            var reclaimedFiles: Int = 0
+            var errorsCount: Int = 0
+            var categoryReclaimed: [JunkCategoryType: Int64] = [:]
+            var updatedCategories: [JunkCategory] = []
+            var dryRunTargets: [String] = []
             
-            for item in categories[catIdx].items {
-                if item.isSelected {
+            for var category in categoriesSnapshot {
+                let categoryType = category.id
+                var catReclaimedForType: Int64 = 0
+                var remainingItems: [JunkItem] = []
+                
+                for item in category.items {
+                    guard item.isSelected else {
+                        remainingItems.append(item)
+                        continue
+                    }
+                    
+                    let rawItemPath = item.path.standardizedFileURL.path
+                    let standardizedItemPath = PathProtection.standardizedPath(of: item.path)
+                    let isInTrash = item.category == .trash
+                        || rawItemPath.hasPrefix(rawTrashPath + "/")
+                        || standardizedItemPath.hasPrefix(standardizedHomeTrashPath + "/")
+                    let intendedDestination: DeletionDestination = isInTrash ? .permanent : .trash
+                    
                     // Safety check against critical system paths
                     if let protErr = PathProtection.evaluatePath(url: item.path) {
-                        print("Skipping protected path: \(item.path.path) - \(protErr.localizedDescription)")
+                        AppLogger.security.warning("Skipping protected path: \(item.path.path) - \(protErr.localizedDescription)")
+                        logManager.log(
+                            sourceModule: "System Junk",
+                            path: item.path.path,
+                            sizeBytes: item.size,
+                            destination: intendedDestination,
+                            isSuccess: false,
+                            errorMessage: protErr.localizedDescription
+                        )
                         errorsCount += 1
                         remainingItems.append(item)
                         continue
                     }
                     
                     if isDryRun {
-                        DryRunManager.shared.logSimulation(action: "Trash Junk Item", target: item.path.path)
+                        dryRunTargets.append(item.path.path)
+                        logManager.log(
+                            sourceModule: "System Junk",
+                            path: item.path.path,
+                            sizeBytes: item.size,
+                            destination: .simulated,
+                            isSuccess: true
+                        )
                         reclaimedBytes += item.size
                         reclaimedFiles += max(1, item.fileCount)
                         catReclaimedForType += item.size
-                        // Item simulated as removed
                     } else {
                         do {
-                            if item.path.path.hasPrefix(homeTrashPath) {
+                            if isInTrash {
+                                guard rawItemPath != rawTrashPath && standardizedItemPath != standardizedHomeTrashPath else {
+                                    throw PathProtectionError.essentialUserDirectory(item.path.path)
+                                }
                                 // Already in trash -> remove to empty trash item
                                 try fm.removeItem(at: item.path)
+                            } else if let trashHandler = trashHandler {
+                                try trashHandler(item.path)
                             } else {
                                 // Move to macOS Trash safely!
                                 try fm.trashItem(at: item.path, resultingItemURL: nil)
                             }
                             
+                            logManager.log(
+                                sourceModule: "System Junk",
+                                path: item.path.path,
+                                sizeBytes: item.size,
+                                destination: intendedDestination,
+                                isSuccess: true
+                            )
+                            
                             reclaimedBytes += item.size
                             reclaimedFiles += max(1, item.fileCount)
                             catReclaimedForType += item.size
                         } catch {
-                            print("Error trashing \(item.path.path): \(error.localizedDescription)")
+                            AppLogger.cleanup.error("Error cleaning \(item.path.path): \(error.localizedDescription)")
+                            logManager.log(
+                                sourceModule: "System Junk",
+                                path: item.path.path,
+                                sizeBytes: item.size,
+                                destination: intendedDestination,
+                                isSuccess: false,
+                                errorMessage: error.localizedDescription
+                            )
                             errorsCount += 1
                             remainingItems.append(item)
                         }
                     }
-                } else {
-                    remainingItems.append(item)
+                }
+                
+                category.items = remainingItems
+                updatedCategories.append(category)
+                if catReclaimedForType > 0 {
+                    categoryReclaimed[categoryType] = catReclaimedForType
                 }
             }
             
-            categories[catIdx].items = remainingItems
-            if catReclaimedForType > 0 {
-                categoryReclaimed[categoryType] = catReclaimedForType
-            }
+            return (
+                updatedCategories: updatedCategories,
+                reclaimedBytes: reclaimedBytes,
+                reclaimedFiles: reclaimedFiles,
+                errorsCount: errorsCount,
+                categoryReclaimed: categoryReclaimed,
+                dryRunTargets: dryRunTargets
+            )
+        }.value
+        
+        for target in outcome.dryRunTargets {
+            DryRunManager.shared.logSimulation(action: "Trash Junk Item", target: target)
         }
+        
+        self.categories = outcome.updatedCategories
         
         let elapsed = Date().timeIntervalSince(startTime)
         let result = CleanResult(
-            reclaimedBytes: reclaimedBytes,
-            reclaimedFilesCount: reclaimedFiles,
-            errorsCount: errorsCount,
+            reclaimedBytes: outcome.reclaimedBytes,
+            reclaimedFilesCount: outcome.reclaimedFiles,
+            errorsCount: outcome.errorsCount,
             duration: elapsed,
-            cleanedCategorySizes: categoryReclaimed,
+            cleanedCategorySizes: outcome.categoryReclaimed,
             isDryRun: isDryRun
         )
         
@@ -648,8 +643,8 @@ public class SystemJunkScanner: ObservableObject {
         self.isCleaning = false
         self.showReclaimedAnimation = true
         self.currentScanningStep = isDryRun ?
-            "Dry-Run complete: Simulated \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) across \(reclaimedFiles) items." :
-            "Clean completed: Safely moved \(ByteCountFormatter.string(fromByteCount: reclaimedBytes, countStyle: .file)) to Trash."
+            "Dry-Run complete: Simulated \(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)) across \(outcome.reclaimedFiles) items." :
+            "Clean completed: Safely moved \(ByteCountFormatter.string(fromByteCount: outcome.reclaimedBytes, countStyle: .file)) to Trash."
         
         // Refresh system storage model as well
         StorageModel.shared.refresh()

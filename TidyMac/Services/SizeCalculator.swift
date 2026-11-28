@@ -71,10 +71,9 @@ public enum SizeCalculator {
         var totalBytes: Int64 = 0
         var totalFiles: Int = 0
         
-        var options: FileManager.DirectoryEnumerationOptions = []
-        if !followSymlinks {
-            options.insert(.skipsPackageDescendants) // Optional: can be configured
-        }
+        // Do not skip package descendants so .app, .framework, .bundle, and .xcarchive contents are measured accurately;
+        // FileManager.enumerator already avoids traversing directory symlinks by default.
+        let options: FileManager.DirectoryEnumerationOptions = []
         
         guard let enumerator = fm.enumerator(
             at: url,

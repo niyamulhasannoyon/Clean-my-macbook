@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 struct MaintenanceView: View {
     @ObservedObject private var service = MaintenanceService.shared
@@ -143,6 +146,7 @@ struct MaintenanceView: View {
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                         .buttonStyle(.plain)
+                                        .disabled(service.isRunningAny)
                                     }
                                     
                                 case .failed(let err):
@@ -165,6 +169,7 @@ struct MaintenanceView: View {
                                         .font(.caption)
                                         .foregroundColor(.pink)
                                         .buttonStyle(.plain)
+                                        .disabled(service.isRunningAny)
                                     }
                                     
                                 case .cancelled:
@@ -179,6 +184,7 @@ struct MaintenanceView: View {
                                         .font(.caption)
                                         .foregroundColor(.pink)
                                         .buttonStyle(.plain)
+                                        .disabled(service.isRunningAny)
                                     }
                                 }
                             }

@@ -1,8 +1,12 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 struct PrivacyView: View {
     @ObservedObject private var scanner = PrivacyScanner.shared
     @ObservedObject private var fdaManager = FullDiskAccessManager.shared
+    @ObservedObject private var dryRun = DryRunManager.shared
     @State private var browserToQuit: BrowserType? = nil
     @State private var showingQuitConfirmation: Bool = false
     
@@ -89,11 +93,13 @@ struct PrivacyView: View {
                             .foregroundColor(.green)
                         
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Privacy Traces Erased Successfully!")
+                            Text(dryRun.isEnabled ? "[Dry-Run] Privacy Cleanup Simulated" : "Privacy Traces Erased Successfully!")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(.green)
                             if scanner.lastReclaimedBytes > 0 {
-                                Text("Reclaimed \(ByteCountFormatter.string(fromByteCount: scanner.lastReclaimedBytes, countStyle: .file)) of storage.")
+                                Text(dryRun.isEnabled
+                                    ? "Simulated \(ByteCountFormatter.string(fromByteCount: scanner.lastReclaimedBytes, countStyle: .file)) (no files modified)."
+                                    : "Reclaimed \(ByteCountFormatter.string(fromByteCount: scanner.lastReclaimedBytes, countStyle: .file)) of storage.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -138,7 +144,7 @@ struct PrivacyView: View {
                 // Browser Sections
                 ForEach(BrowserType.allCases) { browser in
                     let browserItems = scanner.items.filter { $0.browser == browser }
-                    let isRunning = scanner.isBrowserRunning(browser)
+                    let isRunning = scanner.runningBrowsers.contains(browser)
                     
                     VStack(alignment: .leading, spacing: 12) {
                         // Browser Header
@@ -233,6 +239,7 @@ struct PrivacyView: View {
                                         Toggle("", isOn: $scanner.items[idx].isEnabled)
                                             .toggleStyle(.checkbox)
                                             .labelsHidden()
+                                            .disabled(!scanner.items[idx].isAvailable)
                                         
                                         Image(systemName: item.category.icon)
                                             .font(.system(size: 14))
@@ -259,9 +266,10 @@ struct PrivacyView: View {
                                     }
                                     .padding(.vertical, 6)
                                     .padding(.horizontal, 10)
+                                    .opacity(scanner.items[idx].isAvailable ? 1.0 : 0.55)
                                     .background(
                                         RoundedRectangle(cornerRadius: 8)
-                                            .fill(scanner.items[idx].isEnabled ? browser.tintColor.opacity(0.04) : Color.clear)
+                                            .fill(scanner.items[idx].isEnabled && scanner.items[idx].isAvailable ? browser.tintColor.opacity(0.04) : Color.clear)
                                     )
                                 }
                             }
@@ -327,12 +335,15 @@ struct PrivacyView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
                         .buttonStyle(.plain)
-                        .disabled(scanner.isClearing || !scanner.items.contains(where: { $0.isEnabled }))
+                        .disabled(scanner.isClearing || scanner.isScanning || !scanner.items.contains(where: { $0.isEnabled && $0.isAvailable }))
                     }
                 }
                 .padding(.top, 10)
             }
             .padding(24)
+        }
+        .task {
+            scanner.scan()
         }
         .alert(isPresented: $showingQuitConfirmation) {
             Alert(

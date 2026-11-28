@@ -9,7 +9,6 @@ public enum JunkCategoryType: String, CaseIterable, Identifiable, Hashable {
     case mailAttachments = "Mail Attachments Cache"
     case trash = "Trash Bins"
     case iosBackups = "iOS Device Backups"
-    case unusedLanguages = "Unused Language Files (.lproj)"
     
     public var id: String { rawValue }
     
@@ -22,7 +21,6 @@ public enum JunkCategoryType: String, CaseIterable, Identifiable, Hashable {
         case .mailAttachments: return "envelope.badge"
         case .trash: return "trash.fill"
         case .iosBackups: return "iphone.badge.play"
-        case .unusedLanguages: return "character.book.closed.fill"
         }
     }
     
@@ -35,7 +33,6 @@ public enum JunkCategoryType: String, CaseIterable, Identifiable, Hashable {
         case .mailAttachments: return .teal
         case .trash: return .orange
         case .iosBackups: return .mint
-        case .unusedLanguages: return .pink
         }
     }
     
@@ -55,8 +52,6 @@ public enum JunkCategoryType: String, CaseIterable, Identifiable, Hashable {
             return "Items in your macOS Trash bin ready for permanent removal."
         case .iosBackups:
             return "Legacy local backup archives of iPhone and iPad devices."
-        case .unusedLanguages:
-            return "Localization files (.lproj) in apps for languages you don't use."
         }
     }
     
@@ -64,13 +59,13 @@ public enum JunkCategoryType: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .userCaches, .systemLogs, .xcodeDeveloper, .browserCaches, .trash:
             return true
-        case .mailAttachments, .iosBackups, .unusedLanguages:
+        case .mailAttachments, .iosBackups:
             return false // Safe default for user-sensitive data
         }
     }
     
     public var isOptionalScan: Bool {
-        return self == .unusedLanguages
+        return false
     }
 }
 

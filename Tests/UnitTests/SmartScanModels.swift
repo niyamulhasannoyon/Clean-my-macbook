@@ -1,1 +1,0 @@
-../../TidyMac/Models/SmartScanModels.swift

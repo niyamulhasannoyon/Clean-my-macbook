@@ -7,25 +7,46 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
+        .library(
+            name: "TidyMacCore",
+            targets: ["TidyMacCore"]
+        ),
         .executable(
             name: "TidyMac",
             targets: ["TidyMac"]
         )
     ],
     targets: [
-        .executableTarget(
-            name: "TidyMac",
+        .target(
+            name: "TidyMacCore",
             path: "TidyMac",
             exclude: [
-                "Resources/Info.plist",
-                "Resources/Assets.xcassets",
-                "Resources/AppIcon.icns",
-                "Resources/TidyMac.entitlements",
-                "Resources/PrivacyInfo.xcprivacy"
+                "App",
+                "Views",
+                "Resources"
+            ],
+            sources: [
+                "Models",
+                "Services"
+            ]
+        ),
+        .executableTarget(
+            name: "TidyMac",
+            dependencies: ["TidyMacCore"],
+            path: "TidyMac",
+            exclude: [
+                "Models",
+                "Services",
+                "Resources"
+            ],
+            sources: [
+                "App",
+                "Views"
             ]
         ),
         .executableTarget(
             name: "UnitTests",
+            dependencies: ["TidyMacCore"],
             path: "Tests/UnitTests"
         )
     ]

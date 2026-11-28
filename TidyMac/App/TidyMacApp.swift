@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 @main
 struct TidyMacApp: App {
@@ -39,7 +42,7 @@ struct TidyMacApp: App {
                     AppLogger.general.info("User triggered manual update check")
                     let alert = NSAlert()
                     alert.messageText = "TidyMac is Up to Date"
-                    alert.informativeText = "TidyMac Version 1.0.1 (Build 2) is the latest release."
+                    alert.informativeText = "TidyMac Version 1.0.2 (Build 3) is the latest release."
                     alert.alertStyle = .informational
                     alert.addButton(withTitle: "OK")
                     alert.runModal()

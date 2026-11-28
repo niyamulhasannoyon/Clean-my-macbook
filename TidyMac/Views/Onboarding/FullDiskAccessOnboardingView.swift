@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 /// Onboarding and permission walkthrough view for macOS Full Disk Access.
 /// Presents a clear, visual 4-step guide, explains system requirements,

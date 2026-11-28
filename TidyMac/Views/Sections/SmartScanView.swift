@@ -1,10 +1,17 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct SmartScanView: View {
     @StateObject private var coordinator = SmartScanCoordinator.shared
     @ObservedObject private var fdaManager = FullDiskAccessManager.shared
+    @ObservedObject private var junkScanner = SystemJunkScanner.shared
+    @ObservedObject private var largeFilesScanner = LargeOldFilesScanner.shared
+    @ObservedObject private var dryRunManager = DryRunManager.shared
     @Binding var selectedNavigationItem: NavigationItem?
+    @State private var showCleanConfirmation: Bool = false
     
     public init(selectedNavigationItem: Binding<NavigationItem?> = .constant(nil)) {
         self._selectedNavigationItem = selectedNavigationItem
@@ -69,6 +76,20 @@ public struct SmartScanView: View {
         .sheet(isPresented: $coordinator.isShowingReviewSheet) {
             SmartScanReviewView(selectedNavigationItem: $selectedNavigationItem)
         }
+        .confirmationDialog(
+            cleanConfirmationTitle,
+            isPresented: $showCleanConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(cleanConfirmationButtonLabel, role: .destructive) {
+                Task {
+                    await coordinator.performCleanAll()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(cleanConfirmationMessage)
+        }
     }
     
     // MARK: - Header Status Helpers
@@ -105,26 +126,40 @@ public struct SmartScanView: View {
     private var heroVisualizerCard: some View {
         VStack(spacing: 20) {
             ZStack {
-                let isScanning: Bool = {
-                    if case .scanning = coordinator.state { return true }
-                    if case .cleaning = coordinator.state { return true }
-                    return false
+                let isInProgress: Bool = {
+                    switch coordinator.state {
+                    case .scanning, .cleaning:
+                        return true
+                    case .idle, .completed, .celebration:
+                        return false
+                    }
+                }()
+                
+                let progressTitle: String? = {
+                    switch coordinator.state {
+                    case .scanning:
+                        return "Analyzing"
+                    case .cleaning:
+                        return "Cleaning"
+                    case .idle, .completed, .celebration:
+                        return nil
+                    }
                 }()
                 
                 // Outer glowing / pulsating ring
                 Circle()
                     .stroke(
                         (!fdaManager.hasFullDiskAccess ? Color.orange : Color.cyan)
-                            .opacity(isScanning ? 0.35 : 0.1),
+                            .opacity(isInProgress ? 0.35 : 0.1),
                         lineWidth: 8
                     )
                     .frame(width: 175, height: 175)
-                    .scaleEffect(isScanning ? 1.08 : 1.0)
+                    .scaleEffect(isInProgress ? 1.08 : 1.0)
                     .animation(
-                        isScanning ?
+                        isInProgress ?
                             Animation.easeInOut(duration: 1.0).repeatForever(autoreverses: true) :
                             .default,
-                        value: isScanning
+                        value: isInProgress
                     )
                 
                 // Circular Progress Arc
@@ -132,8 +167,8 @@ public struct SmartScanView: View {
                     progress: coordinator.progress,
                     lineWidth: 10,
                     gradientColors: !fdaManager.hasFullDiskAccess ? [.orange, .red] : (coordinator.state == .completed ? [.green, .teal] : [.cyan, .blue]),
-                    showPercentText: isScanning,
-                    title: isScanning ? (coordinator.state == .completed ? "Done" : "Analyzing") : nil
+                    showPercentText: isInProgress,
+                    title: progressTitle
                 )
                 .frame(width: 145, height: 145)
                 
@@ -267,10 +302,22 @@ public struct SmartScanView: View {
                 tintColor: .blue,
                 title: "System Junk",
                 valueText: coordinator.summary.formattedJunkSize,
-                subtitleText: "User caches, logs, trash (\(coordinator.summary.junkFilesCount) items)",
-                statusBadge: "Ready to Clean",
+                subtitleText: junkScanner.totalFoundFilesCount > coordinator.summary.junkFilesCount
+                    ? "\(coordinator.summary.junkFilesCount) selected of \(junkScanner.totalFoundFilesCount) found"
+                    : "User caches, logs, trash (\(coordinator.summary.junkFilesCount) items)",
+                statusBadge: coordinator.summary.junkFilesCount > 0 ? "Ready to Clean" : (junkScanner.totalFoundFilesCount > 0 ? "Review Optional" : "Clean"),
                 statusColor: .blue,
-                isSelected: $coordinator.summary.isJunkSelected,
+                isSelected: Binding(
+                    get: { coordinator.summary.isJunkSelected },
+                    set: { newValue in
+                        if newValue && junkScanner.totalSelectedFilesCount == 0 && junkScanner.totalFoundFilesCount > 0 {
+                            coordinator.activeReviewTab = .systemJunk
+                            coordinator.isShowingReviewSheet = true
+                        } else {
+                            coordinator.summary.isJunkSelected = newValue
+                        }
+                    }
+                ),
                 onReview: {
                     coordinator.activeReviewTab = .systemJunk
                     coordinator.isShowingReviewSheet = true
@@ -282,11 +329,27 @@ public struct SmartScanView: View {
                 icon: "folder.badge.clock",
                 tintColor: .teal,
                 title: "Large & Old Files",
-                valueText: coordinator.summary.formattedLargeFilesSize,
-                subtitleText: "\(coordinator.summary.largeFilesCount) massive archives & old files (>100MB)",
-                statusBadge: "Found",
+                valueText: coordinator.summary.largeFilesCount > 0
+                    ? coordinator.summary.formattedLargeFilesSize
+                    : coordinator.summary.formattedLargeFilesFoundSize,
+                subtitleText: coordinator.summary.largeFilesCount > 0
+                    ? "\(coordinator.summary.largeFilesCount) of \(coordinator.summary.largeFilesFoundCount) selected for removal"
+                    : "\(coordinator.summary.largeFilesFoundCount) found (>100MB) — review to select",
+                statusBadge: coordinator.summary.isLargeFilesSelected && coordinator.summary.largeFilesCount > 0
+                    ? "\(coordinator.summary.largeFilesCount) Selected"
+                    : (coordinator.summary.largeFilesFoundCount > 0 ? "Review Required" : "None Found"),
                 statusColor: .teal,
-                isSelected: $coordinator.summary.isLargeFilesSelected,
+                isSelected: Binding(
+                    get: { coordinator.summary.isLargeFilesSelected },
+                    set: { newValue in
+                        if newValue && largeFilesScanner.selectedFiles.isEmpty {
+                            coordinator.activeReviewTab = .largeFiles
+                            coordinator.isShowingReviewSheet = true
+                        } else {
+                            coordinator.summary.isLargeFilesSelected = newValue
+                        }
+                    }
+                ),
                 onReview: {
                     coordinator.activeReviewTab = .largeFiles
                     coordinator.isShowingReviewSheet = true
@@ -309,14 +372,14 @@ public struct SmartScanView: View {
                 }
             )
             
-            // 4. Performance & Speed Card
+            // 4. Performance & DNS Card
             SmartSummaryCard(
                 icon: "bolt.circle.fill",
                 tintColor: .cyan,
-                title: "Performance & RAM",
-                valueText: "\(coordinator.summary.formattedPurgeableRAM) RAM",
-                subtitleText: "Purgeable buffers & \(coordinator.summary.performanceTasksCount) maintenance tasks",
-                statusBadge: "Optimization Ready",
+                title: "Performance",
+                valueText: "\(coordinator.summary.formattedPurgeableRAM) Inactive",
+                subtitleText: "Action: Flush DNS Cache",
+                statusBadge: "DNS Flush Ready",
                 statusColor: .green,
                 isSelected: $coordinator.summary.isPerformanceSelected,
                 onReview: {
@@ -370,34 +433,99 @@ public struct SmartScanView: View {
             .buttonStyle(.plain)
             
             // "Clean All" Primary Button
+            let canCleanAll = coordinator.summary.totalCleanableBytes > 0 || coordinator.summary.isPerformanceSelected
             Button(action: {
-                Task {
-                    await coordinator.performCleanAll()
-                }
+                showCleanConfirmation = true
             }) {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkles")
-                    Text("Clean All (\(coordinator.summary.formattedTotalCleanable))")
+                    Text(cleanAllButtonTitle)
                         .fontWeight(.bold)
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 12)
                 .background(
                     LinearGradient(
-                        colors: coordinator.summary.totalCleanableBytes > 0 ? [.cyan, .blue] : [.gray, .secondary],
+                        colors: canCleanAll ? [.cyan, .blue] : [.gray, .secondary],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
                 )
                 .foregroundColor(.white)
                 .clipShape(Capsule())
-                .shadow(color: .blue.opacity(0.35), radius: 8, x: 0, y: 3)
+                .shadow(color: canCleanAll ? .blue.opacity(0.35) : .clear, radius: 8, x: 0, y: 3)
             }
             .buttonStyle(.plain)
-            .disabled(coordinator.summary.totalCleanableBytes == 0)
+            .disabled(!canCleanAll)
         }
         .padding(.horizontal, 6)
         .padding(.top, 6)
+    }
+    
+    private var cleanAllButtonTitle: String {
+        if coordinator.summary.totalCleanableBytes > 0 {
+            return "Clean All (\(coordinator.summary.formattedTotalCleanable))"
+        } else if coordinator.summary.isPerformanceSelected {
+            return "Clean All (Flush DNS Cache)"
+        } else {
+            return "Clean All"
+        }
+    }
+    
+    private var cleanConfirmationTitle: String {
+        let totalFiles = coordinator.summary.totalSelectedFilesCount
+        if totalFiles > 0 {
+            return "Clean \(totalFiles) Selected Items?"
+        } else if coordinator.summary.isPerformanceSelected {
+            return "Flush DNS Cache?"
+        } else {
+            return "Confirm Smart Cleanup"
+        }
+    }
+    
+    private var cleanConfirmationButtonLabel: String {
+        let totalFiles = coordinator.summary.totalSelectedFilesCount
+        if coordinator.summary.totalCleanableBytes > 0 {
+            return "Move \(totalFiles) Items (\(coordinator.summary.formattedTotalCleanable)) to Trash"
+        } else if totalFiles > 0 {
+            return "Move \(totalFiles) Items to Trash"
+        } else {
+            return "Flush DNS Cache"
+        }
+    }
+    
+    private var cleanConfirmationMessage: String {
+        let summary = coordinator.summary
+        var lines: [String] = []
+        
+        if summary.isJunkSelected && (summary.junkFilesCount > 0 || summary.junkBytes > 0) {
+            lines.append("• System Junk: \(summary.junkFilesCount) items (\(summary.formattedJunkSize))")
+        }
+        if summary.isLargeFilesSelected && (summary.largeFilesCount > 0 || summary.largeFilesBytes > 0) {
+            lines.append("• Large & Old Files: \(summary.largeFilesCount) files (\(summary.formattedLargeFilesSize))")
+        }
+        if summary.isPrivacySelected && (summary.privacyFilesCount > 0 || summary.privacyBytes > 0) {
+            lines.append("• Privacy Traces: \(summary.privacyFilesCount) items (\(summary.formattedPrivacySize))")
+        }
+        if summary.isPerformanceSelected {
+            lines.append("• Performance: Flush DNS Cache")
+        }
+        
+        let totalFiles = summary.totalSelectedFilesCount
+        if totalFiles > 0 {
+            lines.append("")
+            lines.append("Total selected: \(totalFiles) items (\(summary.formattedTotalCleanable)) will be moved safely to macOS Trash.")
+        } else if summary.isPerformanceSelected {
+            lines.append("")
+            lines.append("No files will be moved to Trash.")
+        }
+        
+        if dryRunManager.isEnabled {
+            lines.append("")
+            lines.append("[Dry-Run Mode] Simulation only — no files or system caches will be modified.")
+        }
+        
+        return lines.joined(separator: "\n")
     }
     
     // MARK: - Idle State Preview Highlights
@@ -406,7 +534,7 @@ public struct SmartScanView: View {
             IdleModulePill(icon: "trash.fill", color: .blue, title: "System Junk", desc: "User caches, logs, trash")
             IdleModulePill(icon: "folder.badge.clock", color: .teal, title: "Large Files", desc: "Old archives & downloads")
             IdleModulePill(icon: "hand.raised.fill", color: .purple, title: "Privacy Traces", desc: "Cookies & web history")
-            IdleModulePill(icon: "bolt.circle.fill", color: .cyan, title: "Performance", desc: "Purgeable RAM & maintenance")
+            IdleModulePill(icon: "bolt.circle.fill", color: .cyan, title: "Performance", desc: "Flush DNS Cache & RAM stats")
         }
     }
 }

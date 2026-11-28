@@ -1,25 +1,47 @@
 import Cocoa
 import CoreGraphics
 
-func createIcon(size: CGFloat) -> NSImage {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
+func createIconBitmap(size: Int) -> NSBitmapImageRep? {
+    let pixelSize = CGFloat(size)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: size,
+        pixelsHigh: size,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ) else {
+        return nil
+    }
+    // Pin 1 point = 1 pixel so Retina displays do not double the output dimensions.
+    rep.size = NSSize(width: pixelSize, height: pixelSize)
     
-    guard let ctx = NSGraphicsContext.current?.cgContext else {
-        image.unlockFocus()
-        return image
+    guard let graphicsContext = NSGraphicsContext(bitmapImageRep: rep) else {
+        return nil
     }
     
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = graphicsContext
+    defer {
+        graphicsContext.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    
+    let ctx = graphicsContext.cgContext
     ctx.setAllowsAntialiasing(true)
     ctx.setShouldAntialias(true)
     ctx.interpolationQuality = .high
     
     // Scale factor relative to 1024
-    let s = size / 1024.0
+    let s = pixelSize / 1024.0
     
     // Canvas: inset slightly for standard macOS app icon shadow
     let inset: CGFloat = 80.0 * s
-    let squircleRect = CGRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset)
+    let squircleRect = CGRect(x: inset, y: inset, width: pixelSize - 2 * inset, height: pixelSize - 2 * inset)
     let cornerRadius: CGFloat = squircleRect.width * 0.224
     
     // 1. Drop Shadow under the squircle
@@ -101,8 +123,11 @@ func createIcon(size: CGFloat) -> NSImage {
         )
     }
     
+    let whitePalette = NSImage.SymbolConfiguration(paletteColors: [.white])
+    
     // Draw SF Symbol: "sparkles"
     let symbolConfig = NSImage.SymbolConfiguration(pointSize: 420.0 * s, weight: .bold)
+        .applying(whitePalette)
     if let symbolImage = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "TidyMac")?.withSymbolConfiguration(symbolConfig) {
         
         // Shadow for the symbol
@@ -118,12 +143,12 @@ func createIcon(size: CGFloat) -> NSImage {
         let symY = squircleRect.midY - symHeight / 2.0 - (10.0 * s)
         let symRect = CGRect(x: symX, y: symY, width: symWidth, height: symHeight)
         
-        // Render symbol tinted in crisp white with slight top-down luminescence
         symbolImage.draw(in: symRect, from: .zero, operation: .sourceOver, fraction: 1.0)
     }
     
     // 6. Secondary accent SF Symbol badge: "internaldrive.fill" small icon at bottom right inside squircle
     let badgeConfig = NSImage.SymbolConfiguration(pointSize: 130.0 * s, weight: .semibold)
+        .applying(whitePalette)
     if let badgeImage = NSImage(systemSymbolName: "internaldrive.fill", accessibilityDescription: "Storage")?.withSymbolConfiguration(badgeConfig) {
         let bW = badgeImage.size.width
         let bH = badgeImage.size.height
@@ -141,28 +166,26 @@ func createIcon(size: CGFloat) -> NSImage {
     }
     
     ctx.restoreGState()
-    
-    image.unlockFocus()
-    return image
+    return rep
 }
 
-func savePNG(image: NSImage, to url: URL) {
-    guard let tiffData = image.tiffRepresentation,
-          let rep = NSBitmapImageRep(data: tiffData),
-          let pngData = rep.representation(using: .png, properties: [:]) else {
+func savePNG(rep: NSBitmapImageRep, to url: URL) -> Bool {
+    guard let pngData = rep.representation(using: .png, properties: [:]) else {
         print("Failed to encode PNG for \(url.lastPathComponent)")
-        return
+        return false
     }
     do {
         try pngData.write(to: url)
-        print("  Generated: \(url.lastPathComponent) (\(Int(image.size.width))x\(Int(image.size.height)))")
+        print("  Generated: \(url.lastPathComponent) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+        return true
     } catch {
         print("Failed to save \(url.path): \(error)")
+        return false
     }
 }
 
 // Sizes needed for macOS .iconset
-let iconSizes: [(name: String, size: CGFloat)] = [
+let iconSizes: [(name: String, size: Int)] = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),
     ("icon_32x32.png", 32),
@@ -177,30 +200,50 @@ let iconSizes: [(name: String, size: CGFloat)] = [
 
 let fileManager = FileManager.default
 let currentDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-let iconsetDir = currentDir.appendingPathComponent("AppIcon.iconset")
+let scriptProjectRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+let projectRoot = fileManager.fileExists(atPath: currentDir.appendingPathComponent("Package.swift").path)
+    ? currentDir
+    : scriptProjectRoot
+
+let iconsetDir = projectRoot.appendingPathComponent("AppIcon.iconset")
+let resourcesDir = projectRoot.appendingPathComponent("TidyMac/Resources")
+let outputIcnsURL = resourcesDir.appendingPathComponent("AppIcon.icns")
+let assetIconsetDir = resourcesDir.appendingPathComponent("Assets.xcassets/AppIcon.appiconset")
 
 try? fileManager.createDirectory(at: iconsetDir, withIntermediateDirectories: true)
+try? fileManager.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
 
 print("\n🎨 Generating TidyMac SF Symbols Original App Icon Set...")
 
 for item in iconSizes {
-    let img = createIcon(size: item.size)
+    guard let rep = createIconBitmap(size: item.size) else {
+        print("Failed to render bitmap for \(item.name)")
+        exit(1)
+    }
     let dest = iconsetDir.appendingPathComponent(item.name)
-    savePNG(image: img, to: dest)
+    guard savePNG(rep: rep, to: dest) else {
+        exit(1)
+    }
+    if fileManager.fileExists(atPath: assetIconsetDir.path) {
+        let assetDest = assetIconsetDir.appendingPathComponent(item.name)
+        _ = savePNG(rep: rep, to: assetDest)
+    }
 }
 
-print("Running iconutil to generate AppIcon.icns...")
+print("Running iconutil to generate \(outputIcnsURL.path)...")
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-proc.arguments = ["-c", "icns", iconsetDir.path, "-o", currentDir.appendingPathComponent("AppIcon.icns").path]
+proc.arguments = ["-c", "icns", iconsetDir.path, "-o", outputIcnsURL.path]
 do {
     try proc.run()
     proc.waitUntilExit()
     if proc.terminationStatus == 0 {
-        print("✅ AppIcon.icns successfully created!")
+        print("✅ \(outputIcnsURL.path) successfully created!")
     } else {
         print("❌ iconutil failed with code \(proc.terminationStatus)")
+        exit(proc.terminationStatus)
     }
 } catch {
     print("Error executing iconutil: \(error)")
+    exit(1)
 }

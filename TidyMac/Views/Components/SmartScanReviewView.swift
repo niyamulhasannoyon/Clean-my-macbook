@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+#if canImport(TidyMacCore)
+import TidyMacCore
+#endif
 
 public struct SmartScanReviewView: View {
     @ObservedObject var coordinator = SmartScanCoordinator.shared
@@ -129,6 +132,8 @@ public struct SmartScanReviewView: View {
                 Button(junkScanner.allSelected ? "Deselect All" : "Select All") {
                     junkScanner.toggleSelectAll(!junkScanner.allSelected)
                     coordinator.summary.junkBytes = junkScanner.totalSelectedSize
+                    coordinator.summary.junkFilesCount = junkScanner.totalSelectedFilesCount
+                    coordinator.summary.isJunkSelected = junkScanner.totalSelectedFilesCount > 0
                 }
                 .font(.caption.weight(.semibold))
             }
@@ -176,7 +181,7 @@ public struct SmartScanReviewView: View {
             }
             
             ForEach(privacyScanner.items) { item in
-                PrivacyItemReviewRow(item: item, privacyScanner: privacyScanner)
+                PrivacyItemReviewRow(item: item, privacyScanner: privacyScanner, coordinator: coordinator)
             }
         }
     }
@@ -185,24 +190,48 @@ public struct SmartScanReviewView: View {
     private var performanceReviewTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("System Performance & Tuning")
+                Text("System Performance & DNS Cache")
                     .font(.headline)
                 Spacer()
-                Text("3 Routines Available")
+                Text("1 Smart Scan Action")
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.cyan)
             }
             
-            // RAM Purge Tile
+            // Flush DNS Cache Action Tile
             HStack(spacing: 12) {
-                Image(systemName: "memorychip")
+                Image(systemName: "network")
                     .font(.system(size: 20))
                     .foregroundColor(.cyan)
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Purge Inactive Memory & Application Buffers")
+                    Text("Flush DNS Cache")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Reclaims inactive cached RAM blocks for active foreground processes.")
+                    Text("Clears the macOS domain resolver cache via dscacheutil -flushcache.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Text("Included")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.green)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+            .cornerRadius(10)
+            
+            // Actual Inactive RAM Metric (Informational)
+            HStack(spacing: 12) {
+                Image(systemName: "memorychip")
+                    .font(.system(size: 20))
+                    .foregroundColor(.blue)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Inactive Memory (Informational)")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Live inactive RAM from macOS VM stats; managed automatically by the kernel.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -211,11 +240,16 @@ public struct SmartScanReviewView: View {
                 
                 Text(coordinator.summary.formattedPurgeableRAM)
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundColor(.cyan)
+                    .foregroundColor(.blue)
             }
             .padding(12)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
             .cornerRadius(10)
+            
+            Text("Additional Maintenance Routines (Available in Maintenance Section)")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
             
             // Maintenance tasks
             ForEach(maintenanceService.tasks.prefix(3)) { task in
@@ -233,9 +267,9 @@ public struct SmartScanReviewView: View {
                     
                     Spacer()
                     
-                    Text("Ready")
-                        .font(.caption.weight(.bold))
-                        .foregroundColor(.green)
+                    Text("Maintenance")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
                 }
                 .padding(10)
                 .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
@@ -261,6 +295,8 @@ private struct JunkCategoryReviewRow: View {
                             junkScanner.categories[idx].items[itemIdx].isSelected = newValue
                         }
                         coordinator.summary.junkBytes = junkScanner.totalSelectedSize
+                        coordinator.summary.junkFilesCount = junkScanner.totalSelectedFilesCount
+                        coordinator.summary.isJunkSelected = junkScanner.totalSelectedFilesCount > 0
                     }
                 }
             )) {
@@ -274,8 +310,9 @@ private struct JunkCategoryReviewRow: View {
             
             Spacer()
             
-            Text(cat.formattedSelectedSize)
+            Text(cat.isSelected || cat.isPartiallySelected ? cat.formattedSelectedSize : "0 B (\(cat.formattedTotalSize) found)")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundColor(cat.isSelected || cat.isPartiallySelected ? .primary : .secondary)
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
@@ -296,6 +333,8 @@ private struct LargeFileReviewRow: View {
                     if let idx = largeFilesScanner.files.firstIndex(where: { $0.id == file.id }) {
                         largeFilesScanner.files[idx].isSelected = newValue
                         coordinator.summary.largeFilesBytes = largeFilesScanner.selectedSize
+                        coordinator.summary.largeFilesCount = largeFilesScanner.selectedFiles.count
+                        coordinator.summary.isLargeFilesSelected = !largeFilesScanner.selectedFiles.isEmpty
                     }
                 }
             ))
@@ -327,6 +366,7 @@ private struct LargeFileReviewRow: View {
 private struct PrivacyItemReviewRow: View {
     let item: PrivacyItem
     @ObservedObject var privacyScanner: PrivacyScanner
+    @ObservedObject var coordinator: SmartScanCoordinator
     
     var body: some View {
         HStack(spacing: 12) {
@@ -335,6 +375,10 @@ private struct PrivacyItemReviewRow: View {
                 set: { newValue in
                     if let idx = privacyScanner.items.firstIndex(where: { $0.id == item.id }) {
                         privacyScanner.items[idx].isEnabled = newValue
+                        let enabledAvailable = privacyScanner.items.filter { $0.isEnabled && $0.isAvailable }
+                        coordinator.summary.privacyBytes = enabledAvailable.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                        coordinator.summary.privacyFilesCount = enabledAvailable.reduce(0) { $0 + $1.fileCount }
+                        coordinator.summary.isPrivacySelected = coordinator.summary.privacyFilesCount > 0 || coordinator.summary.privacyBytes > 0
                     }
                 }
             ))

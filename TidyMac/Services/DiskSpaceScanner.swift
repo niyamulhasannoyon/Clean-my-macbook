@@ -11,6 +11,7 @@ public final class DiskSpaceScanner: ObservableObject {
     @Published public var breadcrumbs: [DiskNode] = []
     
     @Published public var isScanning: Bool = false
+    @Published public var isDeepScanning: Bool = false
     @Published public var scanProgress: Double = 0.0
     @Published public var currentScanningPath: String = ""
     @Published public var statusMessage: String = "Ready to analyze disk space"
@@ -19,6 +20,8 @@ public final class DiskSpaceScanner: ObservableObject {
     @Published public var hoveredNode: DiskNode?
     @Published public var selectedNode: DiskNode?
     @Published public var scanError: String? = nil
+    
+    private var activeDeepScanTask: Task<Void, Never>?
     
     public init() {
         // Initial setup with Home folder
@@ -36,10 +39,14 @@ public final class DiskSpaceScanner: ObservableObject {
     
     // MARK: - Navigation: Drill Down
     public func drillDown(to node: DiskNode) {
-        guard node.isDirectory && !node.children.isEmpty else {
+        guard node.canDrillDown else {
             selectedNode = node
             return
         }
+        
+        activeDeepScanTask?.cancel()
+        activeDeepScanTask = nil
+        isDeepScanning = false
         
         selectedNode = nil
         hoveredNode = nil
@@ -51,11 +58,50 @@ public final class DiskSpaceScanner: ObservableObject {
         } else {
             breadcrumbs.append(node)
         }
+        
+        // On-demand deeper scan beyond initial maxDepth when drilling into an unscanned folder
+        if !node.hasScannedChildren && !node.isVirtual && node.isDirectory {
+            isDeepScanning = true
+            statusMessage = "Scanning \(node.name)..."
+            let targetURL = node.url
+            let targetName = node.name
+            let baseDepth = node.level
+            
+            activeDeepScanTask = Task { [weak self] in
+                let scannedSubtree = await Task.detached(priority: .userInitiated) {
+                    Self.scanDirectoryHierarchy(
+                        url: targetURL,
+                        displayName: targetName,
+                        maxDepth: baseDepth + 2,
+                        currentDepth: baseDepth
+                    )
+                }.value
+                
+                guard let self = self, !Task.isCancelled else { return }
+                
+                for child in scannedSubtree.children {
+                    child.parent = node
+                }
+                node.children = scannedSubtree.children
+                node.fileCount = scannedSubtree.fileCount
+                node.size = scannedSubtree.size
+                node.hasScannedChildren = true
+                
+                if self.currentNode?.id == node.id {
+                    self.isDeepScanning = false
+                    self.statusMessage = "Analysis complete: \(node.formattedSize) mapped across \(node.children.count) items."
+                }
+                self.activeDeepScanTask = nil
+            }
+        }
     }
     
     // MARK: - Navigation: Drill Up
     public func drillUp() {
         guard breadcrumbs.count > 1 else { return }
+        activeDeepScanTask?.cancel()
+        activeDeepScanTask = nil
+        isDeepScanning = false
         breadcrumbs.removeLast()
         currentNode = breadcrumbs.last
         selectedNode = nil
@@ -65,6 +111,9 @@ public final class DiskSpaceScanner: ObservableObject {
     // MARK: - Navigation: Jump to Breadcrumb
     public func navigateTo(breadcrumb: DiskNode) {
         guard let idx = breadcrumbs.firstIndex(where: { $0.id == breadcrumb.id }) else { return }
+        activeDeepScanTask?.cancel()
+        activeDeepScanTask = nil
+        isDeepScanning = false
         breadcrumbs = Array(breadcrumbs.prefix(through: idx))
         currentNode = breadcrumb
         selectedNode = nil
@@ -74,6 +123,9 @@ public final class DiskSpaceScanner: ObservableObject {
     // MARK: - Fast Disk Space Scan
     public func startScan(at customURL: URL? = nil) async {
         guard !isScanning else { return }
+        activeDeepScanTask?.cancel()
+        activeDeepScanTask = nil
+        isDeepScanning = false
         isScanning = true
         scanProgress = 0.0
         statusMessage = "Analyzing directory structure..."
@@ -119,7 +171,7 @@ public final class DiskSpaceScanner: ObservableObject {
             options: [.skipsHiddenFiles]
         ) else {
             let size = fastDirectorySize(url: url, fm: fm)
-            return DiskNode(url: url, name: displayName, path: url.path, isDirectory: true, size: size)
+            return DiskNode(url: url, name: displayName, path: url.path, isDirectory: true, size: size, level: currentDepth, hasScannedChildren: true)
         }
         
         var childNodes: [DiskNode] = []
@@ -150,7 +202,9 @@ public final class DiskSpaceScanner: ObservableObject {
                             name: itemName,
                             path: itemURL.path,
                             isDirectory: true,
-                            size: sz
+                            size: sz,
+                            level: currentDepth + 1,
+                            hasScannedChildren: false
                         )
                     }
                     
@@ -168,7 +222,9 @@ public final class DiskSpaceScanner: ObservableObject {
                             path: itemURL.path,
                             isDirectory: false,
                             size: sz,
-                            fileCount: 1
+                            fileCount: 1,
+                            level: currentDepth + 1,
+                            hasScannedChildren: true
                         )
                         childNodes.append(fileNode)
                         totalFolderSize += sz
@@ -190,6 +246,11 @@ public final class DiskSpaceScanner: ObservableObject {
             if !tiny.isEmpty && significant.count >= 5 {
                 let tinySum = tiny.reduce(Int64(0)) { $0 + $1.size }
                 let tinyFiles = tiny.reduce(0) { $0 + $1.fileCount }
+                
+                for (i, tinyItem) in tiny.enumerated() where !tinyItem.isVirtual {
+                    tinyItem.color = DiskColorPalette.color(for: i)
+                }
+                
                 let otherNode = DiskNode(
                     url: url.appendingPathComponent("Other Items"),
                     name: "Other Items (\(tiny.count))",
@@ -198,14 +259,20 @@ public final class DiskSpaceScanner: ObservableObject {
                     size: tinySum,
                     fileCount: tinyFiles,
                     children: tiny,
-                    color: Color.secondary.opacity(0.7)
+                    color: Color.secondary.opacity(0.7),
+                    level: currentDepth + 1,
+                    isVirtual: true,
+                    hasScannedChildren: true
                 )
+                for tinyItem in tiny {
+                    tinyItem.parent = otherNode
+                }
                 childNodes = significant + [otherNode]
             }
         }
         
-        // Assign palette colors to primary children
-        for (i, child) in childNodes.enumerated() {
+        // Assign palette colors to primary children (preserving virtual nodes' gray color)
+        for (i, child) in childNodes.enumerated() where !child.isVirtual {
             child.color = DiskColorPalette.color(for: i)
         }
         
@@ -217,7 +284,8 @@ public final class DiskSpaceScanner: ObservableObject {
             size: totalFolderSize,
             fileCount: totalFilesCount,
             children: childNodes,
-            level: currentDepth
+            level: currentDepth,
+            hasScannedChildren: true
         )
         
         for child in childNodes {
@@ -279,11 +347,13 @@ public final class DiskSpaceScanner: ObservableObject {
     
     // MARK: - Reveal in Finder
     public func revealInFinder(node: DiskNode) {
+        guard !node.isVirtual, FileManager.default.fileExists(atPath: node.url.path) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([node.url])
     }
     
     // MARK: - Open in Default App
     public func openItem(node: DiskNode) {
+        guard !node.isVirtual, FileManager.default.fileExists(atPath: node.url.path) else { return }
         NSWorkspace.shared.open(node.url)
     }
 }
